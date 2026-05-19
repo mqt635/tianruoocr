@@ -22,7 +22,7 @@ namespace TrOCR
         // 导入 Windows API 函数
         [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         //关键修改: 在这里添加 LoadLibrary 的声明，废弃，也无用了
-         private static extern IntPtr LoadLibrary(string lpFileName);
+         public static extern IntPtr LoadLibrary(string lpFileName);
         // 无用：private static extern bool SetDllDirectory(string lpPathName);
         /// <summary>
         /// DPI缩放因子
@@ -36,26 +36,118 @@ namespace TrOCR
         [STAThread]
         public static void Main(string[] args)
         {
-            // 在程序启动的最开始（例如 Program.cs 的 Main 方法顶部）
-            // 这会告诉 Debug 和 Trace 将所有输出写入到 "debug_log.txt" 文件中
-            //string logPath = Path.Combine(Application.StartupPath, "debug_log.txt");
-            string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data", "debug_log.txt");
-
-            var listener = new TextWriterTraceListener(logPath);
-
-            Debug.Listeners.Add(listener);
-            //Trace.Listeners.Add(listener)
-
-            // 设置 AutoFlush <b>非常重要</b>，否则可能文件里什么都看不到
-            Debug.AutoFlush = true;
-
-            Debug.WriteLine("===== 应用程序启动，日志开始 =====");
-
+           /* 
+            *另一种定义dll依赖查找路径的方法，尝试修复使用收纳法后， PaddleOCR2初始化找不到依赖的问题。
+            *经过测试，没有修复成功，把所有dll移动到lib文件夹后，PaddleOCR2初始化还是找不到依赖，只能把它相关的sdcb.paddle等dll依旧放在exe同级目录了
             try
             {
-                 //【新增】使用 NativeLibrary.Load 抢先加载 Sdcb.PaddleOCR 的核心DLL
+                // 1. 获取 lib 文件夹的绝对路径
+                var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                var libPath = Path.Combine(baseDir, "lib");
+
+                // 2. 同时也把 PaddleOCR_data 的路径加进去（如果你还没把里面的东西移到 lib）
+                // 如果你已经把 PaddleOCR_data 里的 dll 都移到 lib 了，下面这两行可以不要
+                //var paddle64 = Path.Combine(baseDir, "PaddleOCR_data", "win_x64");
+                //var rapid64 = Path.Combine(baseDir, "RapidOCR_data", "win_x64");
+
+                // 3. 获取当前进程的环境变量 PATH
+                string pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
+
+                // 4. 把我们的路径拼接到最前面 (优先搜索我们的目录)
+                // 注意：用分号 ; 分隔
+                string newPathEnv = $"{libPath};{paddle64};{rapid64};{pathEnv}";
+
+                // 5. 设置回当前进程的环境变量 (只影响本软件，不影响系统其他软件)
+                //Environment.SetEnvironmentVariable("PATH", newPathEnv);//同下一行代码
+                // 明确告诉所有人：我只改当前进程的变量，不污染系统，
+                Environment.SetEnvironmentVariable("PATH", newPathEnv, EnvironmentVariableTarget.Process);
+
+                // 【调试用】打印一下看看有没有设置成功
+                System.Diagnostics.Debug.WriteLine($"PATH patched: {libPath}");
+            }
+            catch (Exception ex)
+            {
+                // 就算出错也不要阻断程序启动，万一系统环境本来就是好的呢
+                System.Diagnostics.Debug.WriteLine($"设置环境变量失败: {ex.Message}");
+            }*/
+            try
+            {
+                // 设置应用程序视觉样式，放在main函数一开始，try之前也行，会更符合惯例，懒得改了。
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+               
+                // ====================【核心修复开始】====================
+                // 在调用 SetDefaultDllDirectories 锁定 DLL 搜索路径之前，
+                // 强制访问一次 System.Drawing，触发 GDI+ 的加载。
+                // 解决 Win7 下 "无法找到字体“?”" 的崩溃问题。
+                // Win7 兼容性补丁
+                // 必须在 SetDefaultDllDirectories 之前执行！
+                // 作用：强制触发 .NET 加载并初始化 GDI+ 及其字体缓存。
+                // 如果不加这句，在打过安全补丁的 Win7 上，后续锁定 DLL 路径会导致
+                // GDI+ 无法加载字体依赖，引发 "ArgumentException: 无法找到字体" 崩溃。
+                // =======================================================================
+                try
+                {
+                    //变量无意义，只是为了强制访问一次
+                    var _ = System.Drawing.SystemFonts.DefaultFont;
+                }
+                catch
+                {
+                    // 即使失败也不要阻断程序启动，这只是一个预热操作
+                }
+                //或者变一下变量名：
+                /*try
+                {
+                   //变量无意义，只是为了强制访问一次
+                   var forceLoad = System.Drawing.SystemFonts.DefaultFont;
+                }
+                catch
+                {
+                   // 即使出错也不要阻断，但这通常能成功预加载 gdiplus.dll
+                }*/
+                // -------------------------------------------------------------------------
+                // 2.  开启 TLS 1.2 (解决win7系统 OpenAI等接口报错,
+                // 经过测试，解决失败，win7的加密套件太老了，即使win7开启tls1.2，目标网站还是不认
+                //目前只找到一个办法在win7，使用nginx反向代理目标网站(api地址)，然后软件设置接口填入nginx,这样能使用nginx的加密套件，跳过win7旧的加密套件
+                //不知道clash这类代理软件行不行，解决原理是能跳过使用win7系统的老旧的加密套件，使用目标网站支持的新加密套件，满足这个原理的软件应该都行，不只nginx)
+                // -------------------------------------------------------------------------
+                // 下面代码写不写都行，写一下吧。
+                // 注意ServicePointManager是全局的，只要有一处地方更改就行了。ServicePointManager.SecurityProtocol 是一个 静态（Static） 的全局属性
+                // 我发现有些helper类里又设置了ServicePointManager，会覆盖掉program.cs里设置的。
+                // 所以其实项目里有一处设置ServicePointManager的就行了，可以删掉helper类里的或者删掉program里的，我懒得改了。其实保留program里的删掉其他类里的更好一点
+                try
+                {
+                    System.Net.ServicePointManager.SecurityProtocol =
+                        System.Net.SecurityProtocolType.Tls12 |
+                        System.Net.SecurityProtocolType.Tls11 |
+                        System.Net.SecurityProtocolType.Tls;
+                }
+                catch
+                {
+                    /// 兼容写法，防止老版 .NET 编译报错
+                    System.Net.ServicePointManager.SecurityProtocol = (System.Net.SecurityProtocolType)3072;
+                }
+
+                // ====================【核心修复结束】====================
+                // 在程序启动的最开始告诉 Debug 和 Trace 将所有输出写入到 "debug_log.txt" 文件中
+                // 1. 先确保 Data 文件夹存在
+                string dataDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data");
+                if (!Directory.Exists(dataDir))
+                {
+                    Directory.CreateDirectory(dataDir);
+                }
+                // 2. 然后再初始化日志
+                string logPath = Path.Combine(dataDir, "debug_log.txt");
+                var listener = new TextWriterTraceListener(logPath);
+                Debug.Listeners.Add(listener);
+                //Trace.Listeners.Add(listener)
+                // 设置 AutoFlush <b>非常重要</b>，否则可能文件里什么都看不到
+                Debug.AutoFlush = true;
+                Debug.WriteLine("===== 应用程序启动，日志开始 =====");
+
+                //【新增】使用 NativeLibrary.Load 抢先加载 Sdcb.PaddleOCR 的核心DLL
                 //    这必须是 Main 方法中的第一件事。
-                 // ==========================================================
+                // ==========================================================
                 //  PreloadPaddleOcrNativeLibs();
                 // 1. 启用新的DLL搜索模式，这是使用 AddDllDirectory 的前提
                 // 我们告诉系统，除了我们手动添加的目录，也别忘了搜索默认的系统目录
@@ -79,6 +171,8 @@ namespace TrOCR
                     pathsToAdd.Add(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "RapidOCR_data", "win_x86"));
                 }
 
+                // 通用的非托管/原生DLL /C++ DLL (比如 opencv, onnxruntime 等) exe同级目录找不到就去 lib 文件夹里找
+                pathsToAdd.Add(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "lib"));
                 // 3. 遍历列表，将所有存在的目录添加到搜索路径中
                 foreach (var path in pathsToAdd)
                 {
@@ -107,9 +201,7 @@ namespace TrOCR
                 DealErrorConfig();
                 StaticValue.LoadConfig();
 
-                // 设置应用程序视觉样式
-                Application.EnableVisualStyles();
-                Application.SetCompatibleTextRenderingDefault(false);
+                
                 var version = Environment.OSVersion.Version;
                 var value = new Version("6.1");
                 Factor = CommonHelper.GetDpiFactor();
@@ -128,7 +220,11 @@ namespace TrOCR
                 }
 
                 // 启动更新检查任务并运行主窗体
-                Task.Factory.StartNew(CheckUpdate);
+                // 只有当配置为 True 时，才启动自动更新检查
+                if (IniHelper.GetValue("更新", "检测更新") == "True")
+                {
+                    Task.Factory.StartNew(CheckUpdate);
+                }
                 Application.Run(new FmMain());
             }
             catch (Exception ex)
@@ -327,7 +423,7 @@ namespace TrOCR
                         // 获取版本号（去掉前面的 'v'）
                         var tagName = releaseData["tag_name"].Value<string>();
                         var newVersion = tagName.TrimStart('v', 'V');
-                        var curVersion = Application.ProductVersion;
+                        var curVersion = System.Windows.Forms.Application.ProductVersion.Split('+')[0];
 
                         // 5. 调用新的、健壮的版本比较方法
                         if (!CheckVersion(newVersion, curVersion))

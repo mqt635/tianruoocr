@@ -3,6 +3,7 @@
   <!-- <Import Project="packages\Sdcb.PaddleInference.runtime.win64.openblas-noavx.3.1.0.54\build\net45\Sdcb.PaddleInference.runtime.win64.openblas-noavx.props" Condition="Exists('packages\Sdcb.PaddleInference.runtime.win64.openblas-noavx.3.1.0.54\build\net45\Sdcb.PaddleInference.runtime.win64.openblas-noavx.props') And '$(Platform)' == 'x64'" /> -->
   <!-- <Import Project="packages\OpenCvSharp4.runtime.win.4.11.0.20250507\build\net48\OpenCvSharp4.runtime.win.props" Condition="Exists('packages\OpenCvSharp4.runtime.win.4.11.0.20250507\build\net48\OpenCvSharp4.runtime.win.props') And '$(Platform)' == 'x64'" /> -->
   <!-- <Import Project="packages\Sdcb.PaddleInference.runtime.win64.mkl.3.1.0.54\build\net45\Sdcb.PaddleInference.runtime.win64.mkl.props" Condition="Exists('packages\Sdcb.PaddleInference.runtime.win64.mkl.3.1.0.54\build\net45\Sdcb.PaddleInference.runtime.win64.mkl.props') And '$(Platform)' == 'x64'" /> -->
+  <Import Project="packages\GitVersion.MsBuild.5.12.0\build\GitVersion.MsBuild.props" Condition="Exists('packages\GitVersion.MsBuild.5.12.0\build\GitVersion.MsBuild.props')" />
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
@@ -73,6 +74,13 @@
     <DebugType>pdbonly</DebugType>
     <PlatformTarget>x86</PlatformTarget>
     <ErrorReport>prompt</ErrorReport>
+  </PropertyGroup>
+  <!-- 解决使用pathmap无法调试的问题：只在release配置下使用pathmap，这样debug配置下调试，断点就正常了 -->
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|x64' ">
+    <PathMap>$(SolutionDir)=/src/</PathMap>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
+    <PathMap>$(SolutionDir)=/src/</PathMap>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="ClosedXML, Version=0.105.0.0, Culture=neutral, PublicKeyToken=fd1eb21b62ae805b, processorArchitecture=MSIL">
@@ -206,6 +214,8 @@
     <Reference Include="System.Drawing.Common, Version=9.0.0.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>packages\System.Drawing.Common.9.0.9\lib\net462\System.Drawing.Common.dll</HintPath>
     </Reference>
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
     <Reference Include="System.IO.Pipelines, Version=9.0.0.2, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>packages\System.IO.Pipelines.9.0.2\lib\net462\System.IO.Pipelines.dll</HintPath>
     </Reference>
@@ -245,6 +255,7 @@
     <Reference Include="System.Web" />
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.XML" />
+    <Reference Include="System.Xml.Linq" />
     <!-- <Reference Include="System.Xml.Serialization" />
     <Reference Include="System.Xml.XmlSerializer" /> -->
     <Reference Include="TencentCloudCommon, Version=3.0.1276.0, Culture=neutral, processorArchitecture=MSIL">
@@ -282,6 +293,8 @@
     <Compile Include="AliTable.designer.cs">
       <DependentUpon>AliTable.cs</DependentUpon>
     </Compile>
+    <Compile Include="Helper\Models\CustomAITransProvider.cs" />
+    <Compile Include="Helper\Models\CustomAIProvider.cs" />
     <Compile Include="FmFlags.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -301,6 +314,15 @@
       <DependentUpon>FmLoading.cs</DependentUpon>
     </Compile>
     <Compile Include="FmLoadingExport.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="FmMain.Other.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="FmMain.AI.Translate.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="FmMain.AI.OCR.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="FmMain.cs">
@@ -341,8 +363,11 @@
     <Compile Include="Helper\HelpWin32.cs" />
     <Compile Include="Helper\HttpHelper.cs" />
     <Compile Include="Helper\IniHelper.cs" />
+    <Compile Include="Helper\Models\AIModels.cs" />
     <Compile Include="Helper\NetworkInitializer.cs" />
     <Compile Include="Helper\OcrHelper.cs" />
+    <Compile Include="Helper\OpenAICompatibleTranslate.cs" />
+    <Compile Include="Helper\OpenAICompatibleHelper.cs" />
     <Compile Include="Helper\Pangu.cs" />
     <Compile Include="Helper\TranslateHelper.cs" />
     <Compile Include="Helper\BingTranslator.cs" />
@@ -357,6 +382,7 @@
     <Compile Include="Helper\PaddleOCR2Helper.cs" />
     <Compile Include="Helper\RapidOCRHelper.cs" />
     <Compile Include="Helper\TrOCRUtils.cs" />
+    <Compile Include="Helper\WebDavHelper.cs" />
     <Compile Include="Messageload.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -416,6 +442,7 @@
   <ItemGroup>
     <None Include="app.config" />
     <None Include="app.manifest" />
+    <None Include="GitVersion.yml" />
     <None Include="packages.config" />
     <None Include="Properties\Settings.settings">
       <Generator>SettingsSingleFileGenerator</Generator>
@@ -499,6 +526,8 @@
     <!-- <Error Condition="!Exists('packages\Sdcb.PaddleInference.runtime.win64.mkl.3.1.0.54\build\net45\Sdcb.PaddleInference.runtime.win64.mkl.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Sdcb.PaddleInference.runtime.win64.mkl.3.1.0.54\build\net45\Sdcb.PaddleInference.runtime.win64.mkl.props'))" /> -->
     <Error Condition="!Exists('packages\OpenCvSharp4.runtime.win.4.11.0.20250507\build\net48\OpenCvSharp4.runtime.win.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\OpenCvSharp4.runtime.win.4.11.0.20250507\build\net48\OpenCvSharp4.runtime.win.props'))" />
     <Error Condition="!Exists('packages\Sdcb.PaddleInference.runtime.win64.openblas-noavx.3.1.0.54\build\net45\Sdcb.PaddleInference.runtime.win64.openblas-noavx.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Sdcb.PaddleInference.runtime.win64.openblas-noavx.3.1.0.54\build\net45\Sdcb.PaddleInference.runtime.win64.openblas-noavx.props'))" />
+    <Error Condition="!Exists('packages\GitVersion.MsBuild.5.12.0\build\GitVersion.MsBuild.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\GitVersion.MsBuild.5.12.0\build\GitVersion.MsBuild.props'))" />
+    <Error Condition="!Exists('packages\GitVersion.MsBuild.5.12.0\build\GitVersion.MsBuild.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\GitVersion.MsBuild.5.12.0\build\GitVersion.MsBuild.targets'))" />
   </Target>
   <!-- <Import Project="packages\PaddleOCRSharp.5.1.0\build\PaddleOCRSharp.targets" Condition="Exists('packages\PaddleOCRSharp.5.1.0\build\PaddleOCRSharp.targets') And '$(Platform)' == 'x64'" /> -->
   <Import Project="packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets" Condition="Exists('packages\System.ValueTuple.4.6.1\build\net471\System.ValueTuple.targets')" />
@@ -525,6 +554,23 @@
     )
 )
 IF EXIST "$(TargetDir)dll" ( RD /S /Q "$(TargetDir)dll" )
-IF EXIST "$(TargetDir)PaddleOCR_data" ( RD /S /Q "$(TargetDir)PaddleOCR_data" )</PostBuildEvent>
+IF EXIST "$(TargetDir)PaddleOCR_data" ( RD /S /Q "$(TargetDir)PaddleOCR_data" )
+
+
+if not exist "$(TargetDir)Data\modes" mkdir "$(TargetDir)Data\modes"
+copy /Y "$(ProjectDir)docs\modeconfigs\OCRModes.json" "$(TargetDir)Data\modes\"
+copy /Y "$(ProjectDir)docs\modeconfigs\TranslateModes.json" "$(TargetDir)Data\modes\"
+
+if not exist "$(TargetDir)lib" mkdir "$(TargetDir)lib"
+move "$(TargetDir)*.dll" "$(TargetDir)lib\"
+move /Y "$(TargetDir)*.pdb" "$(TargetDir)lib\"
+move /Y "$(TargetDir)*.xml" "$(TargetDir)lib\"
+move /Y "$(TargetDir)lib\天若OCR文字识别.pdb" "$(TargetDir)"
+if /I "$(PlatformName)" == "x64" (
+move /Y "$(TargetDir)lib\Sdcb.*.dll" "$(TargetDir)"
+move /Y "$(TargetDir)lib\Sdcb.*.xml" "$(TargetDir)"
+)
+</PostBuildEvent>
   </PropertyGroup>
+  <Import Project="packages\GitVersion.MsBuild.5.12.0\build\GitVersion.MsBuild.targets" Condition="Exists('packages\GitVersion.MsBuild.5.12.0\build\GitVersion.MsBuild.targets')" />
 </Project>

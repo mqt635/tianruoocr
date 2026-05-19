@@ -44,6 +44,73 @@ namespace TrOCR
     {
         // 【新增】定义一个携带语言数据的公共事件
         public event EventHandler<TempTranslateEventArgs> TemporaryTranslateRequested;
+        // 【新增】定义状态变量：是否正在程序内部修改字体/格式
+        // public 属性，以便 FmMain 也能读取到
+        public bool IsFontChanging { get; private set; } = false;
+        // 【新增】通用字体切换辅助方法
+        // 作用：统一管理状态锁、颜色切换、配置文件保存
+        private void ChangeFontInternal(string fontName, ToolStripItem activeIcon)
+        {
+            // 1. 上锁：告诉外界（FmMain）现在正在改字体，别触发翻译
+            this.IsFontChanging = true;
+
+            try
+            {
+                // 2. 切换图标颜色 UI
+                this.font_宋体.ForeColor = Color.Black;
+                this.font_黑体.ForeColor = Color.Black;
+                this.font_楷体.ForeColor = Color.Black;
+                this.font_微软雅黑.ForeColor = Color.Black;
+                this.font_新罗马.ForeColor = Color.Black;
+
+                if (activeIcon != null)
+                {
+                    activeIcon.ForeColor = Color.Red;
+                }
+
+                // 3. 核心字体切换逻辑
+                // ------------------------------------------------------------
+                // 先暂停重绘，防止闪烁
+                this.richTextBox1.SuspendLayout();
+                string text = this.richTextBox1.Text;
+                this.richTextBox1.Text = ""; // 这步会触发 TextChanged，但因为锁住了，所以安全
+
+                // 特殊处理：这里未来可以添加切换字体时的emojie渲染问题的修复代码
+
+                Font font = new Font(fontName, 16f * Program.Factor, GraphicsUnit.Pixel);
+
+
+                this.richTextBox1.Font = font;
+                this.richTextBox1.Text = text; // 这步也会触发 TextChanged
+                // 【新增】重新应用文字缩放因子
+                //加个0.000001f，绕过 WinForms 的缓存拦截，修复切换字体后文字缩放失效的bug，下面加 0.000001f的地方同理
+                if (StaticValue.TextScaleFactor >= 0.1f && StaticValue.TextScaleFactor <= 64.0f)
+                {
+                    this.richTextBox1.ZoomFactor = StaticValue.TextScaleFactor+ 0.000001f;
+                }
+
+                // 恢复重绘
+                this.richTextBox1.ResumeLayout();
+
+                // 4. 保存配置
+                // 映射一下显示名和保存名
+                string saveName = fontName;
+                if (fontName == "STKaiti") saveName = "楷体";
+                if (fontName == "Times New Roman") saveName = "新罗马";
+
+                IniHelper.SetValue("工具栏", "字体", saveName);
+            }
+            catch (Exception ex)
+            {
+                // 简单的错误捕获，防止字体不存在导致崩溃
+                System.Diagnostics.Debug.WriteLine("切换字体失败: " + ex.Message);
+            }
+            finally
+            {
+                // 5. 解锁：无论如何都要恢复，防止死锁
+                this.IsFontChanging = false;
+            }
+        }
         protected override void Dispose(bool disposing)
         {
             if (disposing && this.components != null)
@@ -101,6 +168,16 @@ namespace TrOCR
             this.toolStripToolBar.GripStyle = ToolStripGripStyle.Hidden;
             this.toolStripToolBar.Location = new Point(0, 0);
             this.toolStripToolBar.Name = "toolStripToolBar";
+            //修复工具栏图标dpi缩放的代码目前放在构造函数了，放到InitializeComponent这里也行, 
+            // 不过放到这里有个缺陷是vs设计器修改界面后会自动重写代码，可能覆盖掉自己添加的代码，构造函数里的不会被覆盖，
+            // 不过对于本项目来说，这个设计文件本来就不适合使用vs设计器设计，所以无所谓了
+            //修复工具栏图标dpi缩放的代码和构造函数里的一样：if判断加不加都行,这里就不加if判断了，毕竟注释掉了，只是告诉你也可以在这里修复
+            //this.toolStripToolBar.ImageScalingSize = new Size((int)(16 * Program.Factor), (int)(16 * Program.Factor));
+            //根据设置放大图标
+            if(StaticValue.ToolbarIconScaleFactor>0){
+                this.toolStripToolBar.ImageScalingSize = new Size((int)(16 * StaticValue.ToolbarIconScaleFactor), (int)(16 * StaticValue.ToolbarIconScaleFactor));
+            }
+            
             this.toolStripToolBar.RenderMode = ToolStripRenderMode.System;
             this.toolStripToolBar.Size = new Size(600, 25);
             this.toolStripToolBar.TabIndex = 1;
@@ -244,7 +321,8 @@ namespace TrOCR
             this.languagle.DropDownItems.Add(this.zh_en);
             this.languagle.DropDownItems.Add(this.zh_jp);
             this.languagle.DropDownItems.Add(this.zh_ko);
-            this.languagle.AutoSize = false;
+            //注释掉或改为true，这样此图标就跟随设置放大了
+            // this.languagle.AutoSize = false;
             ((ToolStripDropDownMenu)this.languagle.DropDown).ShowImageMargin = false;
             this.languagle.DropDown.BackColor = Color.White;
             this.languagle.DropDown.AutoSize = false;
@@ -274,7 +352,8 @@ namespace TrOCR
             this.Fontstyle.Name = "toolStripButtonclose";
             this.Fontstyle.Size = new Size(23, 22);
             this.Fontstyle.Text = "字体";
-            this.Fontstyle.AutoSize = false;
+            //注释掉或改为true，这样此图标就跟随设置放大了
+            // this.Fontstyle.AutoSize = false;
             ((ToolStripDropDownMenu)this.Fontstyle.DropDown).ShowImageMargin = false;
             this.Fontstyle.DropDown.BackColor = Color.White;
             this.Fontstyle.DropDown.AutoSize = false;
@@ -357,9 +436,45 @@ namespace TrOCR
             this.Font = new Font(this.Font.Name, 9f / StaticValue.DpiFactor, this.Font.Style, this.Font.Unit, this.Font.GdiCharSet, this.Font.GdiVerticalFont);
             this.InitializeComponent();
             this.readIniFile();
-            this.richTextBox1.LanguageOption = RichTextBoxLanguageOptions.UIFonts;
-        }
+             // [新增] 根据 dpi 强制缩放工具栏的 *目标* 图标尺寸
+            //这样工具栏图标也强制放大了，而不只是图标所占格子放大，但是原始图标是16x16的，强制放大后会糊，
+            // 需要提供更高像素的图标，比如32x32，64x64的，这样放大后才清晰不糊
+            // 低像素图标一般放大会糊，但是高像素图标缩小一般不会糊
+            //ps：省事的话只需要一套高像素尺寸图标即可，更专业的是提供不同套像素尺寸的图标，然后根据dpi自动选择或缩放哪一套，
+            // 这里及未来会直接采用省事的方案: 只需要一套高像素图标
+            // if (Program.Factor > 1.0f)//这个if判断去掉也行，dpi对应1.0f的时候，计算一下也没啥性能影响
+            // {
+            //     // 1. 计算新的目标图标大小 (例如 16 * 2.0 = 32)
+            //     int newIconSize = (int)(16 * Program.Factor);
+
+            //     // 2. 将这个新尺寸应用到 *整个工具栏*
+            //     this.toolStripToolBar.ImageScalingSize = new System.Drawing.Size(newIconSize, newIconSize);
+            //     //或者直接            
+            //     // this.toolStripToolBar.ImageScalingSize = new Size((int)(16 * Program.Factor), (int)(16 * Program.Factor));
+
+            // }
+            //字体图标（非图片图标）的思路看上个提交吧
         
+            this.richTextBox1.LanguageOption = RichTextBoxLanguageOptions.UIFonts;
+            // 【新增】应用原生的视图缩放因子
+            // (WinForms 限制 ZoomFactor 必须在 0.015625 到 64.0 之间)
+            if (StaticValue.TextScaleFactor >= 0.1f && StaticValue.TextScaleFactor <= 64.0f)
+            {
+                this.richTextBox1.ZoomFactor = StaticValue.TextScaleFactor+ 0.000001f;
+                
+            }
+        }
+        /// <summary>
+        /// 设置工具栏的可用状态（用于流式输出时禁用，防止误触）
+        /// </summary>
+        public void SetToolbarEnabled(bool enabled)
+        {
+            if (this.toolStripToolBar != null)
+            {
+                this.toolStripToolBar.Enabled = enabled;
+            }
+        }
+
         public override string Text
         {
             get
@@ -369,6 +484,10 @@ namespace TrOCR
             set
             {
                 this.richTextBox1.Text = value;
+                if (StaticValue.TextScaleFactor >= 0.1f && StaticValue.TextScaleFactor <= 64.0f)
+                {
+                    this.richTextBox1.ZoomFactor = StaticValue.TextScaleFactor+ 0.000001f;
+                }
 
             }
         }
@@ -781,87 +900,27 @@ namespace TrOCR
 
         public void font_宋体c(object sender, EventArgs e)
         {
-            this.font_宋体.ForeColor = Color.Red;
-            this.font_黑体.ForeColor = Color.Black;
-            this.font_楷体.ForeColor = Color.Black;
-            this.font_微软雅黑.ForeColor = Color.Black;
-            this.font_新罗马.ForeColor = Color.Black;
-            string text = this.richTextBox1.Text;
-            this.richTextBox1.Text = "";
-            Font font = new Font("宋体", 16f * Program.Factor, GraphicsUnit.Pixel);
-            this.richTextBox1.Font = font;
-            this.richTextBox1.Text = text;
-            
-            // 保存字体设置到配置文件
-            IniHelper.SetValue("工具栏", "字体", "宋体");
+            ChangeFontInternal("宋体", this.font_宋体);
         }
 
         public void font_黑体c(object sender, EventArgs e)
         {
-            this.font_宋体.ForeColor = Color.Black;
-            this.font_黑体.ForeColor = Color.Red;
-            this.font_楷体.ForeColor = Color.Black;
-            this.font_微软雅黑.ForeColor = Color.Black;
-            this.font_新罗马.ForeColor = Color.Black;
-            string text = this.richTextBox1.Text;
-            this.richTextBox1.Text = "";
-            Font font = new Font("黑体", 16f * Program.Factor, GraphicsUnit.Pixel);
-            this.richTextBox1.Font = font;
-            this.richTextBox1.Text = text;
-            
-            // 保存字体设置到配置文件
-            IniHelper.SetValue("工具栏", "字体", "黑体");
+            ChangeFontInternal("黑体", this.font_黑体);
         }
 
         public void font_楷体c(object sender, EventArgs e)
         {
-            this.font_宋体.ForeColor = Color.Black;
-            this.font_黑体.ForeColor = Color.Black;
-            this.font_楷体.ForeColor = Color.Red;
-            this.font_微软雅黑.ForeColor = Color.Black;
-            this.font_新罗马.ForeColor = Color.Black;
-            string text = this.richTextBox1.Text;
-            this.richTextBox1.Text = "";
-            Font font = new Font("STKaiti", 16f * Program.Factor, GraphicsUnit.Pixel);
-            this.richTextBox1.Font = font;
-            this.richTextBox1.Text = text;
-            
-            // 保存字体设置到配置文件
-            IniHelper.SetValue("工具栏", "字体", "楷体");
+            ChangeFontInternal("STKaiti", this.font_楷体);
         }
 
         public void font_微软雅黑c(object sender, EventArgs e)
         {
-            this.font_宋体.ForeColor = Color.Black;
-            this.font_黑体.ForeColor = Color.Black;
-            this.font_楷体.ForeColor = Color.Black;
-            this.font_微软雅黑.ForeColor = Color.Red;
-            this.font_新罗马.ForeColor = Color.Black;
-            string text = this.richTextBox1.Text;
-            this.richTextBox1.Text = "";
-            Font font = new Font("微软雅黑", 16f * Program.Factor, GraphicsUnit.Pixel);
-            this.richTextBox1.Font = font;
-            this.richTextBox1.Text = text;
-            
-            // 保存字体设置到配置文件
-            IniHelper.SetValue("工具栏", "字体", "微软雅黑");
+            ChangeFontInternal("微软雅黑", this.font_微软雅黑);
         }
 
         public void font_新罗马c(object sender, EventArgs e)
         {
-            this.font_宋体.ForeColor = Color.Black;
-            this.font_黑体.ForeColor = Color.Black;
-            this.font_楷体.ForeColor = Color.Black;
-            this.font_微软雅黑.ForeColor = Color.Black;
-            this.font_新罗马.ForeColor = Color.Red;
-            string text = this.richTextBox1.Text;
-            this.richTextBox1.Text = "";
-            Font font = new Font("Times New Roman", 16f * Program.Factor, GraphicsUnit.Pixel);
-            this.richTextBox1.Font = font;
-            this.richTextBox1.Text = text;
-            
-            // 保存字体设置到配置文件
-            IniHelper.SetValue("工具栏", "字体", "新罗马");
+            ChangeFontInternal("Times New Roman", this.font_新罗马);
         }
 
         public void indent_two(int fla)
@@ -869,8 +928,11 @@ namespace TrOCR
             Font font = new Font(this.Font.Name, 9f * Program.Factor, this.Font.Style, this.Font.Unit, this.Font.GdiCharSet, this.Font.GdiVerticalFont);
             Graphics graphics = base.CreateGraphics();
             SizeF sizeF = graphics.MeasureString("中", font);
-            this.richTextBox1.SelectionIndent = (int)sizeF.Width * 2 * fla;
-            this.richTextBox1.SelectionHangingIndent = -(int)sizeF.Width * 2 * fla;
+            //修改文字缩放后的段落左侧间距
+            // 如果启用了缩放，我们可以把基础缩进除以缩放倍数，这样经过 ZoomFactor 放大后，视觉上刚刚好还原
+            float currentScale = StaticValue.TextScaleFactor > 0.1f ? StaticValue.TextScaleFactor : 1.0f;
+            this.richTextBox1.SelectionIndent = (int)((sizeF.Width * 2 * fla) / currentScale);
+            this.richTextBox1.SelectionHangingIndent = -(int)((sizeF.Width * 2 * fla) / currentScale);
             graphics.Dispose();
         }
 
@@ -898,7 +960,7 @@ namespace TrOCR
             if (e.Control && e.KeyCode == Keys.V)
             {
                 e.SuppressKeyPress = true;
-                this.richTextBox1.Paste(DataFormats.GetFormat(DataFormats.Text));
+                this.richTextBox1.Paste(DataFormats.GetFormat(DataFormats.UnicodeText));
             }
             if (e.Control && e.KeyCode == Keys.Z)
             {
@@ -1315,47 +1377,62 @@ namespace TrOCR
         /// <param name="fontName">字体名称</param>
         private void ApplyFontSetting(string fontName)
         {
-            // 重置所有字体菜单项颜色
-            this.font_宋体.ForeColor = Color.Black;
-            this.font_黑体.ForeColor = Color.Black;
-            this.font_楷体.ForeColor = Color.Black;
-            this.font_微软雅黑.ForeColor = Color.Black;
-            this.font_新罗马.ForeColor = Color.Black;
-            
-            string text = this.richTextBox1.Text;
-            this.richTextBox1.Text = "";
-            
-            Font font;
-            switch (fontName)
+            // 1. 上锁：告诉外界（FmMain）现在正在改字体，别触发翻译
+            this.IsFontChanging = true;
+            try
+            { // 重置所有字体菜单项颜色
+                this.font_宋体.ForeColor = Color.Black;
+                this.font_黑体.ForeColor = Color.Black;
+                this.font_楷体.ForeColor = Color.Black;
+                this.font_微软雅黑.ForeColor = Color.Black;
+                this.font_新罗马.ForeColor = Color.Black;
+
+                string text = this.richTextBox1.Text;
+                this.richTextBox1.Text = "";
+
+                Font font;
+                switch (fontName)
+                {
+                    case "宋体":
+                        this.font_宋体.ForeColor = Color.Red;
+                        font = new Font("宋体", 16f * Program.Factor, GraphicsUnit.Pixel);
+                        break;
+                    case "黑体":
+                        this.font_黑体.ForeColor = Color.Red;
+                        font = new Font("黑体", 16f * Program.Factor, GraphicsUnit.Pixel);
+                        break;
+                    case "楷体":
+                        this.font_楷体.ForeColor = Color.Red;
+                        font = new Font("STKaiti", 16f * Program.Factor, GraphicsUnit.Pixel);
+                        break;
+                    case "微软雅黑":
+                        this.font_微软雅黑.ForeColor = Color.Red;
+                        font = new Font("微软雅黑", 16f * Program.Factor, GraphicsUnit.Pixel);
+                        break;
+                    case "新罗马":
+                        this.font_新罗马.ForeColor = Color.Red;
+                        font = new Font("Times New Roman", 16f * Program.Factor, GraphicsUnit.Pixel);
+                        break;
+                    default:
+                        this.font_宋体.ForeColor = Color.Red;
+                        font = new Font("宋体", 16f * Program.Factor, GraphicsUnit.Pixel);
+                        break;
+                }
+
+                this.richTextBox1.Font = font;
+                this.richTextBox1.Text = text;
+                // 【新增】重新应用文字缩放因子
+                if (StaticValue.TextScaleFactor >= 0.1f && StaticValue.TextScaleFactor <= 64.0f)
+                {
+                    this.richTextBox1.ZoomFactor = StaticValue.TextScaleFactor+ 0.000001f;
+                }
+            }
+            finally
             {
-                case "宋体":
-                    this.font_宋体.ForeColor = Color.Red;
-                    font = new Font("宋体", 16f * Program.Factor, GraphicsUnit.Pixel);
-                    break;
-                case "黑体":
-                    this.font_黑体.ForeColor = Color.Red;
-                    font = new Font("黑体", 16f * Program.Factor, GraphicsUnit.Pixel);
-                    break;
-                case "楷体":
-                    this.font_楷体.ForeColor = Color.Red;
-                    font = new Font("STKaiti", 16f * Program.Factor, GraphicsUnit.Pixel);
-                    break;
-                case "微软雅黑":
-                    this.font_微软雅黑.ForeColor = Color.Red;
-                    font = new Font("微软雅黑", 16f * Program.Factor, GraphicsUnit.Pixel);
-                    break;
-                case "新罗马":
-                    this.font_新罗马.ForeColor = Color.Red;
-                    font = new Font("Times New Roman", 16f * Program.Factor, GraphicsUnit.Pixel);
-                    break;
-                default:
-                    this.font_宋体.ForeColor = Color.Red;
-                    font = new Font("宋体", 16f * Program.Factor, GraphicsUnit.Pixel);
-                    break;
+                //解锁：无论如何都要恢复，防止死锁
+                this.IsFontChanging = false;
             }
             
-            this.richTextBox1.Font = font;
-            this.richTextBox1.Text = text;
         }
 
         public void saveIniFile()

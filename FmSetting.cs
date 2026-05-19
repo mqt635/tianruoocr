@@ -1,20 +1,25 @@
+using Microsoft.Win32;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Web;
 using System.Windows.Forms;
-using System.Linq;
-using System.Collections.Generic;
-using Microsoft.Win32;
 using TrOCR.Helper;
+using TrOCR.Helper.Models;
 using TrOCR.Properties;
-using System.Threading.Tasks;
 
 
 namespace TrOCR
@@ -22,7 +27,27 @@ namespace TrOCR
     // 设置窗口类，用于管理OCR和翻译接口的各种配置选项
 	public sealed partial class FmSetting
 	{
-		private Dictionary<Control, Point> _originalControlLocations;
+        // === 自定义 AI 接口相关变量 ===
+
+        // 使用 BindingList 可以在数据修改时自动通知 UI 刷新
+        private BindingList<CustomAIProvider> _customProviders;
+
+        // 当前正在编辑的对象引用
+        private CustomAIProvider _currentEditingProvider = null;
+
+        // 防抖标志：防止代码赋值 Text 属性时触发 TextChanged 事件导致死循环
+        private bool _isUserAction = true;
+
+        // 使用 BindingList 可以在数据修改时自动通知 UI 刷新
+        private BindingList<CustomAITransProvider> _customTransProviders;
+
+        // 当前正在编辑的对象引用
+        private CustomAITransProvider _currentEditingTransProvider = null;
+
+        // 防抖标志：防止代码赋值 Text 属性时触发 TextChanged 事件导致死循环
+        private bool _isUserActionTrans = true;
+
+        private Dictionary<Control, Point> _originalControlLocations;
 
 		private readonly Dictionary<string, string> shortcutMappings = new Dictionary<string, string>
 		{
@@ -44,8 +69,284 @@ namespace TrOCR
 		{
 			Font = new Font(Font.Name, 9f / StaticValue.DpiFactor, Font.Style, Font.Unit, Font.GdiCharSet, Font.GdiVerticalFont);
 			InitializeComponent();
+			// 1. 确保边框是可以拉伸的
+			this.FormBorderStyle = FormBorderStyle.Sizable;
+
+			// 2. 锁定宽度
+			// 让最小宽度等于当前设计的高度
+			this.MinimumSize = new Size(this.Width,0); // 限制最小宽度
+            EnableTabScroll(this.tab_标签);
+            EnableTabScroll(this.tabControl_Trans);;
+            EnableTabScroll(this.tabControl2);
+            EnableTabScroll(this.tabControl_BaiduApiType);
+            EnableTabScroll(this.tabControl_TXApiType);
+            // 1. 绑定滚轮事件
+            //this.tab_标签.MouseWheel += tab_标签_MouseWheel;
+
+            // 2. 关键优化：鼠标移入 TabControl 时自动获取焦点
+            // 如果不加这句，你必须先点一下 TabControl，滚轮才生效，体验很差
+            //this.tab_标签.MouseEnter += (s, e) => { this.tab_标签.Focus(); };
+
+            // 3. 离开时（可选）：把焦点还给别的控件，或者不做处理
+            // === 【新增】启用悬停自动切换（受配置控制） ===
+            if (StaticValue.EnableTabHoverSwitch)
+            {
+                EnableTabHoverSwitch(this.tab_标签);
+                EnableTabHoverSwitch(this.tabControl_Trans);
+                EnableTabHoverSwitch(this.tabControl2);
+                EnableTabHoverSwitch(this.tabControl_BaiduApiType);
+                EnableTabHoverSwitch(this.tabControl_TXApiType);
+            }
+
+        }
+        // 滚轮事件处理逻辑
+        //private void tab_标签_MouseWheel(object sender, MouseEventArgs e)
+        //{
+        //    // 获取当前鼠标位置，判断是否在“标签头”区域
+        //    // 如果你不加这个判断，当你在 TabPage 内容里滚动（比如看长文本）时，也会触发切页，会把人气死
+        //    Rectangle headerRect = this.tab_标签.DisplayRectangle;
+        //    // DisplayRectangle 是内容区，我们判断鼠标如果不在内容区，那就在标题区
+        //    // 或者简单粗暴判断鼠标 Y 坐标小于 30 (假设标签高度是30)
+
+        //    // 这里使用更严谨的判断：只当鼠标在组件顶部范围时才切页
+        //    bool isOverHeader = e.Location.Y < headerRect.Y;
+
+        //    if (isOverHeader)
+        //    {
+        //        // 获取当前选中索引
+        //        int index = this.tab_标签.SelectedIndex;
+
+        //        // e.Delta > 0 代表滚轮向上推 (向前翻)
+        //        if (e.Delta > 0)
+        //        {
+        //            if (index > 0)
+        //                this.tab_标签.SelectedIndex = index - 1;
+        //        }
+        //        // e.Delta < 0 代表滚轮向下滚 (向后翻)
+        //        else
+        //        {
+        //            if (index < this.tab_标签.TabCount - 1)
+        //                this.tab_标签.SelectedIndex = index + 1;
+        //        }
+
+        //        // 标记事件已处理，防止冒泡
+        //        if (e is HandledMouseEventArgs he) he.Handled = true;
+        //    }
+        //}
+        /// <summary>
+        /// 【通用方法】给指定的 TabControl 启用滚轮切换功能
+        /// </summary>
+        private void EnableTabScroll(TabControl tc)
+        {
+            if (tc == null) return;
+
+            // 1. 绑定滚轮事件 (复用同一个处理方法)
+            tc.MouseWheel += Shared_TabControl_MouseWheel;
+
+            // 2. 绑定自动聚焦 (为了让滚轮能直接生效)
+            // 这里用 Lambda 表达式直接捕获当前的 tc 变量
+            tc.MouseEnter += (s, e) => { tc.Focus(); };
+
+			//可选：
+			// 新增：鼠标离开时，把积攒的“能量”清零，防止误触
+			//防抖，移出时清空“积攒”的滚动量，避免下次回来瞬间切换
+			tc.MouseLeave += (s, e) =>
+			{
+				if (_scrollAccumulators.ContainsKey(tc))
+					_scrollAccumulators[tc] = 0;
+			};
 		}
-		private void checkbox_AutoCopyScreenshotTranslation_CheckedChanged(object sender, EventArgs e)
+        // 用一个字典来记录每个 TabControl 当前积攒的滚动值
+        private Dictionary<object, int> _scrollAccumulators = new Dictionary<object, int>();
+
+        // 设定阈值：值越大，切换越慢/越难
+        // 标准鼠标滚动一格通常是 120。
+        // 设为 120 = 滚1格切一次（太快）
+        // 设为 240 = 滚2格切一次（适中）
+        // 设为 360 = 滚3格切一次（比较稳）
+        private const int SCROLL_THRESHOLD = 240;
+		//阈值随意，不是120的倍数也行，任意整数皆可
+
+        /// <summary>
+        /// 【核心逻辑】通用的滚轮处理事件
+        /// </summary>
+        private void Shared_TabControl_MouseWheel(object sender, MouseEventArgs e)
+        {
+			// 关键点：使用 sender 拿到当前正在滚动的那个控件，而不是写死 tabControl1
+			if (sender is TabControl tc)
+			{
+				// 1. 区域判断（鼠标必须在标题栏）
+				Rectangle headerRect = tc.DisplayRectangle;
+				if (e.Location.Y >= headerRect.Y) return; // 如果在内容区，直接退出，保持默认滚动
+
+				// 2. 初始化该控件的计数器
+				if (!_scrollAccumulators.ContainsKey(tc))
+				{
+					_scrollAccumulators[tc] = 0;
+				}
+
+				// 3. 累加滚动值 (e.Delta 通常是 +120 或 -120)
+				_scrollAccumulators[tc] += e.Delta;
+
+				// 4. 判断是否达到阈值
+				// 使用 Abs 绝对值判断，不管向上滚还是向下滚
+				if (Math.Abs(_scrollAccumulators[tc]) >= SCROLL_THRESHOLD)
+				{
+                    int index = tc.SelectedIndex;
+                    int count = tc.TabCount;
+
+                    // 判定方向：累加值大于0是向上/前，小于0是向下/后
+                    if (_scrollAccumulators[tc] > 0)
+					{
+                        if (index > 0)
+                            tc.SelectedIndex = index - 1; // 正常：往前切
+                        else
+                            tc.SelectedIndex = count - 1; // 循环：开头 -> 跳到结尾
+                    }
+					else
+					{
+                        if (index < count - 1)
+                            tc.SelectedIndex = index + 1; // 正常：往后切
+                        else
+                            tc.SelectedIndex = 0;         // 循环：结尾 -> 跳到开头
+                    }
+                    // === 【新增】 ===
+                    // 切换完瞬间，再次强制聚焦 TabControl 自身
+                    // 这会让 WinForms 放弃去寻找子控件的焦点
+                    tc.Focus();
+
+                    // 5. 【关键】触发切换后，清零计数器，准备下一次积累
+                    _scrollAccumulators[tc] = 0;
+				}
+
+				// 6. 阻止冒泡
+				if (e is HandledMouseEventArgs he) he.Handled = true;
+			}
+        }
+        // === 鼠标悬停自动切换标签页相关变量 ===
+        private System.Windows.Forms.Timer _tabHoverTimer;// 当前正在计时的 TabControl
+        private TabControl _currentHoverTabControl;// 当前正在计时的 Tab 索引
+        private int _currentHoverTabIndex = -1;
+        private const int HOVER_SWITCH_DELAY = 600; // 悬停触发延迟（毫秒），可根据需要调整
+        /// <summary>
+        /// 【通用方法】给指定的 TabControl 启用鼠标悬停自动切换功能
+        /// </summary>
+        /// <param name="tc">目标 TabControl</param>
+        private void EnableTabHoverSwitch(TabControl tc)
+        {
+            if (tc == null) return;
+
+            // 初始化全局悬停计时器（单例模式，整个窗体共用一个）
+            if (_tabHoverTimer == null)
+            {
+                _tabHoverTimer = new System.Windows.Forms.Timer();
+                _tabHoverTimer.Interval = HOVER_SWITCH_DELAY;
+                _tabHoverTimer.Tick += TabHoverTimer_Tick;
+            }
+
+            // 绑定鼠标移动事件（检测是否悬停在标题上）
+            tc.MouseMove += TabControl_Hover_MouseMove;
+
+            // 绑定鼠标离开事件（取消计时）
+            tc.MouseLeave += TabControl_Hover_MouseLeave;
+        }
+        /// <summary>
+        /// 鼠标在 TabControl 上移动时触发，检测是否在某个未选中的 Tab 标题上
+        /// </summary>
+        private void TabControl_Hover_MouseMove(object sender, MouseEventArgs e)
+        {
+            // === 实时读取复选框的 UI 状态，而不是全局变量 ===
+            // 只要用户在界面上取消了勾选，哪怕还没关闭窗口保存，也能立刻生效阻断
+            if (!this.checkBox_EnableTabHoverSwitch.Checked)
+            {
+                return;
+            }
+            if (sender is TabControl tc)
+            {
+                int hoveredIndex = -1;
+
+                // 遍历所有标签页，判断鼠标是否在其标题区域内
+                for (int i = 0; i < tc.TabCount; i++)
+                {
+                    if (tc.GetTabRect(i).Contains(e.Location))
+                    {
+                        hoveredIndex = i;
+                        break;
+                    }
+                }
+
+                // 如果鼠标在某个标签标题上，且该标签不是当前选中的标签
+                if (hoveredIndex != -1 && hoveredIndex != tc.SelectedIndex)
+                {
+                    // 如果是一个新的悬停目标（即鼠标从别的标签移过来，或者刚移入）
+                    if (tc != _currentHoverTabControl || hoveredIndex != _currentHoverTabIndex)
+                    {
+                        _currentHoverTabControl = tc;
+                        _currentHoverTabIndex = hoveredIndex;
+
+                        // 重置并启动计时器
+                        _tabHoverTimer.Stop();
+                        _tabHoverTimer.Start();
+                    }
+                    // 如果目标没变，则让计时器继续走，不做操作
+                }
+                else
+                {
+                    // 鼠标不在任何标题上，或者在当前选中的标题上 -> 取消计时
+                    if (_tabHoverTimer != null) _tabHoverTimer.Stop();
+                    _currentHoverTabControl = null;
+                    _currentHoverTabIndex = -1;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 鼠标离开 TabControl 时，停止计时
+        /// </summary>
+        private void TabControl_Hover_MouseLeave(object sender, EventArgs e)
+        {
+            if (_tabHoverTimer != null)
+            {
+                _tabHoverTimer.Stop();
+            }
+            _currentHoverTabControl = null;
+            _currentHoverTabIndex = -1;
+        }
+
+        /// <summary>
+        /// 计时器时间到，执行切换
+        /// </summary>
+        private void TabHoverTimer_Tick(object sender, EventArgs e)
+        {
+            _tabHoverTimer.Stop(); // 停止计时，防止重复触发
+
+            if (_currentHoverTabControl != null &&
+                !_currentHoverTabControl.IsDisposed &&
+                _currentHoverTabIndex >= 0 &&
+                _currentHoverTabIndex < _currentHoverTabControl.TabCount)
+            {
+                // 如果目标索引已经是当前选中的索引，则无需切换
+                if (_currentHoverTabControl.SelectedIndex != _currentHoverTabIndex)
+                {
+                    // 执行切换
+                    _currentHoverTabControl.SelectedIndex = _currentHoverTabIndex;
+
+                    // 可选：切换后让控件获取焦点
+                    // 修改为：仅当当前窗体是激活状态（用户正在操作本软件）时，才获取焦点。
+                    // 这样如果用户在记事本打字，鼠标划过这里，只会切换画面，不会打断打字。
+                    if (Form.ActiveForm == this)
+                    {
+                        _currentHoverTabControl.Focus();
+                    }
+                }
+                
+            }
+            //无论是否切换成功，都清理状态，防止逻辑死锁
+            // 重置状态
+            _currentHoverTabControl = null;
+            _currentHoverTabIndex = -1;
+        }
+        private void checkbox_AutoCopyScreenshotTranslation_CheckedChanged(object sender, EventArgs e)
 		{
 		    // 联动逻辑：只有当“自动复制”被勾选时，“不显示窗口”选项才可用
 		    checkbox_NoWindowScreenshotTranslation.Enabled = checkbox_AutoCopyScreenshotTranslation.Checked;
@@ -56,9 +357,396 @@ namespace TrOCR
 		        checkbox_NoWindowScreenshotTranslation.Checked = false;
 		    }
 		}
+        private void LoadCustomAIProviders()
+        {
+            string jsonPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data", "CustomOpenAIProviders.json");
+            List<CustomAIProvider> list = null;
 
-		// 从配置文件读取设置信息并初始化设置界面控件
-		public void readIniFile()
+            // 1. 读取 JSON
+            if (File.Exists(jsonPath))
+            {
+                try
+                {
+                    string json = File.ReadAllText(jsonPath);
+                    list = JsonConvert.DeserializeObject<List<CustomAIProvider>>(json);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine("读取自定义接口配置失败: " + ex.Message);
+                }
+            }
+
+            // 如果为空，创建一个空列表
+            if (list == null) list = new List<CustomAIProvider>();
+
+            // 2. 转换为 BindingList 并绑定到 ListBox
+            _customProviders = new BindingList<CustomAIProvider>(list);
+
+            lb_CustomProviders.DataSource = _customProviders;
+            lb_CustomProviders.DisplayMember = "Name"; // ListBox 显示 "Name" 属性
+            lb_CustomProviders.ValueMember = "Id";
+
+            // 3. 绑定选中事件
+            lb_CustomProviders.SelectedIndexChanged += Lb_CustomProviders_SelectedIndexChanged;
+
+            // 4. 触发一次选中逻辑以初始化界面状态
+            Lb_CustomProviders_SelectedIndexChanged(null, null);
+        }
+        private void Lb_CustomProviders_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            // 获取当前选中的项
+            if (lb_CustomProviders.SelectedItem is CustomAIProvider item)
+            {
+                _currentEditingProvider = item;
+                _isUserAction = false; //  暂停事件触发，防止 TextChanged 误伤
+
+                // 填充右侧 TextBoxes
+                txt_Name.Text = item.Name;
+                txt_ApiUrl.Text = item.ApiUrl;
+                txt_ApiKey.Text = item.ApiKey;
+                txt_ModelName.Text = item.ModelName;
+                txt_ConfigPath.Text = item.ModelConfigPath;
+
+                // 启用右侧控件
+                ToggleDetailPanel(true);
+
+                _isUserAction = true; //  恢复事件
+            }
+            else
+            {
+                _currentEditingProvider = null;
+                _isUserAction = false;
+
+                // 清空右侧
+                txt_Name.Clear();
+                txt_ApiUrl.Clear();
+                txt_ApiKey.Clear();
+                txt_ModelName.Clear();
+                txt_ConfigPath.Clear();
+
+                // 禁用右侧控件
+                ToggleDetailPanel(false);
+
+                _isUserAction = true;
+            }
+        }
+
+        // 辅助方法：控制右侧是否可编辑
+        private void ToggleDetailPanel(bool enable)
+        {
+            txt_Name.Enabled = enable;
+            txt_ApiUrl.Enabled = enable;
+            txt_ApiKey.Enabled = enable;
+            txt_ModelName.Enabled = enable;
+            txt_ConfigPath.Enabled = enable;
+            btn_BrowseConfig.Enabled = enable;
+        }
+        // 1. 名称修改 (特殊处理：需要刷新 ListBox 显示)
+        private void txt_Name_TextChanged(object sender, EventArgs e)
+        {
+            if (!_isUserAction || _currentEditingProvider == null) return;
+
+            _currentEditingProvider.Name = txt_Name.Text;
+
+            // 强制 ListBox 刷新显示的文字
+            _customProviders.ResetBindings();
+        }
+
+        // 2. 其他字段修改
+        private void txt_ApiUrl_TextChanged(object sender, EventArgs e)
+        {
+			if (!_isUserAction || _currentEditingProvider == null) return;
+    		_currentEditingProvider.ApiUrl = txt_ApiUrl.Text;
+        }
+
+        private void txt_ApiKey_TextChanged(object sender, EventArgs e)
+        {
+            if (!_isUserAction || _currentEditingProvider == null) return;
+            _currentEditingProvider.ApiKey = txt_ApiKey.Text;
+        }
+
+        private void txt_ModelName_TextChanged(object sender, EventArgs e)
+        {
+            if (!_isUserAction || _currentEditingProvider == null) return;
+            _currentEditingProvider.ModelName = txt_ModelName.Text;
+        }
+
+        private void txt_ConfigPath_TextChanged(object sender, EventArgs e)
+        {
+            if (!_isUserAction || _currentEditingProvider == null) return;
+            _currentEditingProvider.ModelConfigPath = txt_ConfigPath.Text;
+        }
+        // 添加按钮
+        private void btn_Add_Provider_Click(object sender, EventArgs e)
+        {
+            var newItem = new CustomAIProvider
+            {
+                Name = "OpenAI兼容 " + (_customProviders.Count + 1),
+                ApiUrl = "https://api.openai.com/v1",
+                ModelName = "gpt-4o"
+            };
+
+            _customProviders.Add(newItem);
+
+            // 自动选中新加的这一项
+            lb_CustomProviders.SelectedItem = newItem;
+        }
+
+        // 删除按钮
+        private void btn_Del_Provider_Click(object sender, EventArgs e)
+        {
+            if (lb_CustomProviders.SelectedItem is CustomAIProvider item)
+            {
+                if (MessageBox.Show($"确定删除接口“{item.Name}”吗？", "确认删除", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+                {
+                    _customProviders.Remove(item);
+                }
+            }
+        }
+
+        // 浏览配置文件按钮
+        private void btn_BrowseConfig_Click(object sender, EventArgs e)
+        {
+            OpenFileDialog dlg = new OpenFileDialog();
+            dlg.Title = "选择模型配置文件 (JSON)";
+            dlg.Filter = "JSON Files|*.json|All Files|*.*";
+            dlg.InitialDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data");
+
+            if (dlg.ShowDialog() == DialogResult.OK)
+            {
+                string fullPath = dlg.FileName;
+                string appPath = AppDomain.CurrentDomain.BaseDirectory;
+				// 确保 appPath 以斜杠结尾 (防御前缀误判)
+				string separator = Path.DirectorySeparatorChar.ToString();
+				if (!appPath.EndsWith(separator))
+				{
+					appPath += separator;
+				}
+
+                // 如果文件在程序目录下，转为相对路径（更美观，便携）
+                if (fullPath.StartsWith(appPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    txt_ConfigPath.Text = fullPath.Substring(appPath.Length).TrimStart('\\', '/');
+                }
+                else
+                {
+                    txt_ConfigPath.Text = fullPath;
+                }
+            }
+        }
+        private void LoadCustomAITransProviders()
+        {
+            string jsonPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data", "CustomOpenAITransProviders.json");
+            List<CustomAITransProvider> list = null;
+
+            // 1. 读取 JSON
+            if (File.Exists(jsonPath))
+            {
+                try
+                {
+                    string json = File.ReadAllText(jsonPath);
+                    list = JsonConvert.DeserializeObject<List<CustomAITransProvider>>(json);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine("读取自定义翻译接口配置失败: " + ex.Message);
+                }
+            }
+
+            // 如果为空，创建一个空列表
+            if (list == null) list = new List<CustomAITransProvider>();
+
+            // 2. 转换为 BindingList 并绑定到 ListBox
+            _customTransProviders = new BindingList<CustomAITransProvider>(list);
+
+            lb_CustomTransProviders.DataSource = _customTransProviders;
+            lb_CustomTransProviders.DisplayMember = "Name"; // ListBox 显示 "Name" 属性
+            lb_CustomTransProviders.ValueMember = "Id";
+
+            // 3. 绑定选中事件
+            lb_CustomTransProviders.SelectedIndexChanged += lb_CustomTransProviders_SelectedIndexChanged;
+
+            // 4. 触发一次选中逻辑以初始化界面状态
+            lb_CustomTransProviders_SelectedIndexChanged(null, null);
+        }
+        private void lb_CustomTransProviders_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            // 获取当前选中的项
+            if (lb_CustomTransProviders.SelectedItem is CustomAITransProvider item)
+            {
+                _currentEditingTransProvider = item;
+                _isUserActionTrans = false; //  暂停事件触发，防止 TextChanged 误伤
+
+                // 填充右侧 TextBoxes
+                txt_Trans_Name.Text = item.Name;
+                txt_Trans_ApiUrl.Text = item.ApiUrl;
+                txt_Trans_ApiKey.Text = item.ApiKey;
+                txt_Trans_ModelName.Text = item.ModelName;
+                txt_Trans_ConfigPath.Text = item.ModelConfigPath;
+				txt_Trans_Source.Text = item.Source;
+				txt_Trans_Target.Text = item.Target;
+
+                // 启用右侧控件
+                ToggleTransDetailPanel(true);
+
+                _isUserActionTrans = true; //  恢复事件
+            }
+            else
+            {
+                _currentEditingTransProvider = null;
+                _isUserActionTrans = false;
+
+                // 清空右侧
+                txt_Trans_Name.Clear();
+                txt_Trans_ApiUrl.Clear();
+                txt_Trans_ApiKey.Clear();
+                txt_Trans_ModelName.Clear();
+                txt_Trans_ConfigPath.Clear();
+				txt_Trans_Source.Clear();
+				txt_Trans_Target.Clear();
+
+                // 禁用右侧控件
+                ToggleTransDetailPanel(false);
+
+                _isUserActionTrans = true;
+            }
+        }
+
+        // 辅助方法：控制右侧是否可编辑
+        private void ToggleTransDetailPanel(bool enable)
+        {
+            txt_Trans_Name.Enabled = enable;
+            txt_Trans_ApiUrl.Enabled = enable;
+            txt_Trans_ApiKey.Enabled = enable;
+            txt_Trans_ModelName.Enabled = enable;
+            txt_Trans_ConfigPath.Enabled = enable;
+            btn_Trans_BrowseConfig.Enabled = enable;
+            txt_Trans_Source.Enabled = enable;
+            txt_Trans_Target.Enabled = enable;
+        }
+        // 1. 名称修改 (特殊处理：需要刷新 ListBox 显示)
+        private void txt_Trans_Name_TextChanged(object sender, EventArgs e)
+        {
+            if (!_isUserActionTrans || _currentEditingTransProvider == null) return;
+
+            _currentEditingTransProvider.Name = txt_Trans_Name.Text;
+
+            // 强制 ListBox 刷新显示的文字
+            _customTransProviders.ResetBindings();
+        }
+
+        // 2. 其他字段修改
+        private void txt_Trans_ApiUrl_TextChanged(object sender, EventArgs e)
+        {
+			if (!_isUserActionTrans || _currentEditingTransProvider == null) return;
+            _currentEditingTransProvider.ApiUrl = txt_Trans_ApiUrl.Text;
+        }
+
+        private void txt_Trans_ApiKey_TextChanged(object sender, EventArgs e)
+        {
+            if (!_isUserActionTrans || _currentEditingTransProvider == null) return;
+            _currentEditingTransProvider.ApiKey = txt_Trans_ApiKey.Text;
+        }
+
+        private void txt_Trans_ModelName_TextChanged(object sender, EventArgs e)
+        {
+            if (!_isUserActionTrans || _currentEditingTransProvider == null) return;
+            _currentEditingTransProvider.ModelName = txt_Trans_ModelName.Text;
+        }
+
+        private void txt_Trans_ConfigPath_TextChanged(object sender, EventArgs e)
+        {
+            if (!_isUserActionTrans || _currentEditingTransProvider == null) return;
+            _currentEditingTransProvider.ModelConfigPath = txt_Trans_ConfigPath.Text;
+        }
+        private void txt_Trans_Source_TextChanged(object sender, EventArgs e)
+        {
+            if (!_isUserActionTrans || _currentEditingTransProvider == null) return;
+            _currentEditingTransProvider.Source = txt_Trans_Source.Text;
+        }
+        private void txt_Trans_Target_TextChanged(object sender, EventArgs e)
+        {
+            if (!_isUserActionTrans || _currentEditingTransProvider == null) return;
+            _currentEditingTransProvider.Target = txt_Trans_Target.Text;
+        }
+        // 添加按钮
+        private void btn_Trans_Add_Provider_Click(object sender, EventArgs e)
+        {
+            var newItem = new CustomAITransProvider
+            {
+                Name = "OpenAI兼容 " + (_customTransProviders.Count + 1),
+                ApiUrl = "https://api.openai.com/v1",
+                ModelName = "gpt-4o"
+            };
+
+            _customTransProviders.Add(newItem);
+
+            // 自动选中新加的这一项
+            lb_CustomTransProviders.SelectedItem = newItem;
+        }
+
+        // 删除按钮
+        private void btn_Trans_Del_Provider_Click(object sender, EventArgs e)
+        {
+            if (lb_CustomTransProviders.SelectedItem is CustomAITransProvider item)
+            {
+                if (MessageBox.Show($"确定删除接口“{item.Name}”吗？", "确认删除", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+                {
+                    _customTransProviders.Remove(item);
+                }
+            }
+        }
+
+        // 浏览配置文件按钮
+        private void btn_Trans_BrowseConfig_Click(object sender, EventArgs e)
+        {
+            OpenFileDialog dlg = new OpenFileDialog();
+            dlg.Title = "选择模型配置文件 (JSON)";
+            dlg.Filter = "JSON Files|*.json|All Files|*.*";
+            dlg.InitialDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data");
+
+            if (dlg.ShowDialog() == DialogResult.OK)
+            {
+                string fullPath = dlg.FileName;
+                string appPath = AppDomain.CurrentDomain.BaseDirectory;
+				// 确保 appPath 以斜杠结尾 (防御前缀误判)
+				string separator = Path.DirectorySeparatorChar.ToString();
+				if (!appPath.EndsWith(separator))
+				{
+					appPath += separator;
+				}
+
+                // 如果文件在程序目录下，转为相对路径（更美观，便携）
+                if (fullPath.StartsWith(appPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    txt_Trans_ConfigPath.Text = fullPath.Substring(appPath.Length).TrimStart('\\', '/');
+                }
+                else
+                {
+                    txt_Trans_ConfigPath.Text = fullPath;
+                }
+            }
+        }
+        private void txtWebDavUrl_Leave(object sender, EventArgs e)
+        {
+            // 写入配置文件，节点名为 "WebDav"，键名为 "Url"
+            IniHelper.SetValue("WebDav", "Url", txtWebDavUrl.Text);
+        }
+
+        // WebDav配置：账户输入框失去焦点后保存
+        private void txtWebDavUser_Leave(object sender, EventArgs e)
+        {
+            IniHelper.SetValue("WebDav", "User", txtWebDavUser.Text);
+        }
+
+        // WebDav配置：密码输入框失去焦点后保存
+        private void txtWebDavPass_Leave(object sender, EventArgs e)
+        {
+            // 建议加密保存，此处先明文
+            IniHelper.SetValue("WebDav", "Password", txtWebDavPass.Text);
+        }
+        // 从配置文件读取设置信息并初始化设置界面控件
+        public void readIniFile()
 		{
 			// 读取基本配置项
 			var value = IniHelper.GetValue("配置", "开机自启");
@@ -349,6 +1037,8 @@ namespace TrOCR
 			checkbox_AutoCopyScreenshotTranslation.Checked = TrOCRUtils.LoadSetting("配置", "AutoCopyScreenshotTranslation", false);
 			// 加载“无窗口截图翻译”设置
 			checkbox_NoWindowScreenshotTranslation.Checked = TrOCRUtils.LoadSetting("配置", "NoWindowScreenshotTranslation", false);
+			// 加载"标签页悬停自动切换"设置
+			checkBox_EnableTabHoverSwitch.Checked = TrOCRUtils.LoadSetting("配置", "EnableTabHoverSwitch", true);
 			// 【重要】在加载后，立即执行一次联动逻辑，以确保初始状态正确
 			checkbox_AutoCopyScreenshotTranslation_CheckedChanged(null, null);
 
@@ -824,7 +1514,24 @@ namespace TrOCR
 
 			// 读取OCR模型配置
 			ReadOcrModelConfigs();
-		}
+
+			
+			//文本改变后自动翻译的延时
+			textBox38.Text=TrOCRUtils.LoadSetting("配置", "文本改变自动翻译延时", "5000");
+			//工具栏图标放大倍数
+			textBox37.Text=TrOCRUtils.LoadSetting("工具栏", "图标放大倍数", "1.0");
+			//文字缩放倍数
+			textBox39.Text=TrOCRUtils.LoadSetting("配置", "文字缩放倍数", "1.0");
+
+            LoadCustomAIProviders();
+            LoadCustomAITransProviders();
+
+			txtWebDavUrl.Text = TrOCRUtils.LoadSetting("WebDav", "Url", "");
+            txtWebDavUser.Text = TrOCRUtils.LoadSetting("WebDav", "User", "");
+            txtWebDavPass.Text = TrOCRUtils.LoadSetting("WebDav", "Password", "");
+
+
+            }
 
 		/// <summary>
 		/// 窗口加载事件处理函数，用于初始化界面控件和读取配置文件
@@ -914,7 +1621,7 @@ namespace TrOCR
 
 			readIniFile();
 			// 使用程序集的实际版本号，而不是写死的值
-			label_VersionInfo.Text = "版本号：" + System.Windows.Forms.Application.ProductVersion;
+			label_VersionInfo.Text = "版本号：" + System.Windows.Forms.Application.ProductVersion.Split('+')[0];
 			label_AuthorInfo.Text = "作者：topkill";
 			chbox_代理服务器.CheckedChanged += chbox_代理服务器_CheckedChanged;
 			更新Button_check.Click += 更新Button_check_Click;
@@ -997,14 +1704,36 @@ namespace TrOCR
 			textBox_RapidOCR_Rec.TextChanged += TextBox_RapidOCR_TextChanged;
 			textBox_RapidOCR_Keys.TextChanged += TextBox_RapidOCR_TextChanged;
 			textBox7.TextChanged += TextBox_RapidOCR_TextChanged;
-		}
 
-		/// <summary>
-		/// ocr接口申请按钮点击事件处理函数，根据当前选中的标签页打开相应的OCR服务申请页面
-		/// </summary>
-		/// <param name="sender">事件发送者</param>
-		/// <param name="e">事件参数</param>
-		private void 百度申请_Click(object sender, EventArgs e)
+            // 批量绑定事件
+            textBox_PaddleOCR_Det.Leave += PathTextBox_Leave;
+            textBox_PaddleOCR_Cls.Leave += PathTextBox_Leave;
+            textBox_PaddleOCR_Rec.Leave += PathTextBox_Leave;
+            textBox_PaddleOCR_Keys.Leave += PathTextBox_Leave;
+            textBox5.Leave += PathTextBox_Leave;
+            textBox_PaddleOCR2_Det.Leave += PathTextBox_Leave;
+            textBox_PaddleOCR2_Cls.Leave += PathTextBox_Leave;
+            textBox_PaddleOCR2_Rec.Leave += PathTextBox_Leave;
+            textBox_PaddleOCR2_Keys.Leave += PathTextBox_Leave;
+            textBox6.Leave += PathTextBox_Leave;
+            textBox_RapidOCR_Det.Leave += PathTextBox_Leave;
+            textBox_RapidOCR_Cls.Leave += PathTextBox_Leave;
+            textBox_RapidOCR_Rec.Leave += PathTextBox_Leave;
+            textBox_RapidOCR_Keys.Leave += PathTextBox_Leave;
+            textBox7.Leave += PathTextBox_Leave;
+			
+			txt_ConfigPath.Leave += PathTextBox_Leave;
+			txt_Trans_ConfigPath.Leave += PathTextBox_Leave;
+
+
+        }
+
+        /// <summary>
+        /// ocr接口申请按钮点击事件处理函数，根据当前选中的标签页打开相应的OCR服务申请页面
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void 百度申请_Click(object sender, EventArgs e)
 		{
 			if (tabControl2.SelectedTab == tabPage_腾讯OCR)
     		{
@@ -1854,239 +2583,528 @@ namespace TrOCR
 		// 窗口关闭事件处理函数，保存所有设置到配置文件
 		private void Form1_FormClosed(object sender, FormClosedEventArgs e)
 		{
-			// 保存基本配置
-			IniHelper.SetValue("配置", "开机自启", cbBox_开机.Checked.ToString());
-			IniHelper.SetValue("配置", "快速翻译", cbBox_翻译.Checked.ToString());
-			IniHelper.SetValue("配置", "识别弹窗", cbBox_弹窗.Checked.ToString());
-			IniHelper.SetValue("配置", "InputTranslateClipboard", cbBox_输入翻译剪贴板.Checked.ToString());
-			IniHelper.SetValue("配置", "InputTranslateAutoTranslate", cbBox_输入翻译自动翻译.Checked.ToString());
-			IniHelper.SetValue("配置", "AutoCopyInputTranslation", checkBox_AutoCopyInputTranslation.Checked.ToString());
-			IniHelper.SetValue("配置", "窗体动画", cobBox_动画.Text);
-			IniHelper.SetValue("配置", "记录数目", numbox_记录.Text);
-			IniHelper.SetValue("配置", "自动保存", cbBox_保存.Checked.ToString());
-			IniHelper.SetValue("配置", "截图位置", textBox_path.Text);
-			IniHelper.SetValue("常规识别", "AutoCopyOcrResult", checkBox_AutoCopyOcrResult.Checked.ToString());
-			IniHelper.SetValue("工具栏", "翻译", checkBox_AutoTranslateOcrResult.Checked.ToString());
-			IniHelper.SetValue("常规翻译", "AutoCopyOcrTranslation", checkBox_AutoCopyOcrTranslation.Checked.ToString());
+            // 【新增】停止并释放计时器，手动显式停止更好些，虽然不手动窗口关闭时也会自动停止定时器
+            if (_tabHoverTimer != null)
+            {
+                _tabHoverTimer.Stop();
+                _tabHoverTimer.Dispose();
+                _tabHoverTimer = null;
+            }
+            saveSettings();
+            DialogResult = DialogResult.OK;
+        }
+		public void saveSettings()
+		{
+            // 保存基本配置
+            IniHelper.SetValue("配置", "开机自启", cbBox_开机.Checked.ToString());
+            IniHelper.SetValue("配置", "快速翻译", cbBox_翻译.Checked.ToString());
+            IniHelper.SetValue("配置", "识别弹窗", cbBox_弹窗.Checked.ToString());
+            IniHelper.SetValue("配置", "InputTranslateClipboard", cbBox_输入翻译剪贴板.Checked.ToString());
+            IniHelper.SetValue("配置", "InputTranslateAutoTranslate", cbBox_输入翻译自动翻译.Checked.ToString());
+            IniHelper.SetValue("配置", "AutoCopyInputTranslation", checkBox_AutoCopyInputTranslation.Checked.ToString());
+            IniHelper.SetValue("配置", "窗体动画", cobBox_动画.Text);
+            IniHelper.SetValue("配置", "记录数目", numbox_记录.Text);
+            IniHelper.SetValue("配置", "自动保存", cbBox_保存.Checked.ToString());
+            IniHelper.SetValue("配置", "截图位置", textBox_path.Text);
+            IniHelper.SetValue("常规识别", "AutoCopyOcrResult", checkBox_AutoCopyOcrResult.Checked.ToString());
+            IniHelper.SetValue("工具栏", "翻译", checkBox_AutoTranslateOcrResult.Checked.ToString());
+            IniHelper.SetValue("常规翻译", "AutoCopyOcrTranslation", checkBox_AutoCopyOcrTranslation.Checked.ToString());
 
-			IniHelper.SetValue("工具栏", "IsMergeRemoveSpace", checkBox_合并去除空格.Checked.ToString());
+            IniHelper.SetValue("工具栏", "IsMergeRemoveSpace", checkBox_合并去除空格.Checked.ToString());
             IniHelper.SetValue("工具栏", "IsMergeRemoveAllSpace", checkBox_合并去除所有空格.Checked.ToString());
             IniHelper.SetValue("工具栏", "IsMergeAutoCopy", checkBox_合并自动复制.Checked.ToString());
-			IniHelper.SetValue("工具栏", "IsSplitAutoCopy", checkBox_拆分后自动复制.Checked.ToString());
-			
-			// 保存快捷键设置
-			IniHelper.SetValue("快捷键", "文字识别", txtBox_文字识别.Text);
-			IniHelper.SetValue("快捷键", "翻译文本", txtBox_翻译文本.Text);
-			IniHelper.SetValue("快捷键", "记录界面", txtBox_记录界面.Text);
-			IniHelper.SetValue("快捷键", "识别界面", txtBox_识别界面.Text);
-			IniHelper.SetValue("快捷键", "输入翻译", txtBox_输入翻译.Text);
-			IniHelper.SetValue("快捷键", "静默识别", txtBox_静默识别.Text);
-			IniHelper.SetValue("快捷键", "截图翻译", txtBox_截图翻译.Text);
+            IniHelper.SetValue("工具栏", "IsSplitAutoCopy", checkBox_拆分后自动复制.Checked.ToString());
 
-			// 【新增】保存剪贴板相关的设置
-			IniHelper.SetValue("配置", "ListenClipboard", cbBox_ListenClipboard.Checked.ToString());
-			IniHelper.SetValue("配置", "AutoCopyListenClipboardTranslation", cbBox_AutoCopyListenClipboardTranslation.Checked.ToString());
-			IniHelper.SetValue("配置", "ListenClipboardTranslationHideOriginal", cbBox_ListenHideOriginal.Checked.ToString());
-			IniHelper.SetValue("配置", "DisableToggleOriginalButton", cbBox_禁用隐藏原文按钮.Checked.ToString());
-			
-			//保存截图翻译相关配置
-			IniHelper.SetValue("配置", "AutoCopyScreenshotTranslation", checkbox_AutoCopyScreenshotTranslation.Checked.ToString());
-			IniHelper.SetValue("配置", "NoWindowScreenshotTranslation", checkbox_NoWindowScreenshotTranslation.Checked.ToString());
-			// 保存百度OCR密钥和语言设置
-			IniHelper.SetValue("密钥_百度", "secret_id", text_baiduaccount.Text);
-			IniHelper.SetValue("密钥_百度", "secret_key", text_baidupassword.Text);
-			var selectedLang = comboBox_Baidu_Language.SelectedItem?.ToString();
-			var langCode = BaiduOcrHelper.GetStandardLanguages().FirstOrDefault(x => x.Value == selectedLang).Key;
-			IniHelper.SetValue("密钥_百度", "language_code", langCode ?? "CHN_ENG");
+            // 保存快捷键设置
+            IniHelper.SetValue("快捷键", "文字识别", txtBox_文字识别.Text);
+            IniHelper.SetValue("快捷键", "翻译文本", txtBox_翻译文本.Text);
+            IniHelper.SetValue("快捷键", "记录界面", txtBox_记录界面.Text);
+            IniHelper.SetValue("快捷键", "识别界面", txtBox_识别界面.Text);
+            IniHelper.SetValue("快捷键", "输入翻译", txtBox_输入翻译.Text);
+            IniHelper.SetValue("快捷键", "静默识别", txtBox_静默识别.Text);
+            IniHelper.SetValue("快捷键", "截图翻译", txtBox_截图翻译.Text);
 
-			// 保存百度高精度OCR密钥和语言设置
-			IniHelper.SetValue("密钥_百度高精度", "secret_id", text_baidu_accurate_apikey.Text);
-			IniHelper.SetValue("密钥_百度高精度", "secret_key", text_baidu_accurate_secretkey.Text);
-			var selectedAccurateLang = comboBox_Baidu_Accurate_Language.SelectedItem?.ToString();
-			var accurateLangCode = BaiduOcrHelper.GetAccurateLanguages().FirstOrDefault(x => x.Value == selectedAccurateLang).Key;
-			IniHelper.SetValue("密钥_百度高精度", "language_code", accurateLangCode ?? "CHN_ENG");
+            // 【新增】保存剪贴板相关的设置
+            IniHelper.SetValue("配置", "ListenClipboard", cbBox_ListenClipboard.Checked.ToString());
+            IniHelper.SetValue("配置", "AutoCopyListenClipboardTranslation", cbBox_AutoCopyListenClipboardTranslation.Checked.ToString());
+            IniHelper.SetValue("配置", "ListenClipboardTranslationHideOriginal", cbBox_ListenHideOriginal.Checked.ToString());
+            IniHelper.SetValue("配置", "DisableToggleOriginalButton", cbBox_禁用隐藏原文按钮.Checked.ToString());
 
-			// 保存百度表格识别密钥
-			IniHelper.SetValue("密钥_百度表格", "secret_id", textBox2.Text);
-			IniHelper.SetValue("密钥_百度表格", "secret_key", textBox1.Text);
+            //保存截图翻译相关配置
+            IniHelper.SetValue("配置", "AutoCopyScreenshotTranslation", checkbox_AutoCopyScreenshotTranslation.Checked.ToString());
+            IniHelper.SetValue("配置", "NoWindowScreenshotTranslation", checkbox_NoWindowScreenshotTranslation.Checked.ToString());
+            // 保存"标签页悬停自动切换"设置
+            IniHelper.SetValue("配置", "EnableTabHoverSwitch", checkBox_EnableTabHoverSwitch.Checked.ToString());
+            // 保存百度OCR密钥和语言设置
+            IniHelper.SetValue("密钥_百度", "secret_id", text_baiduaccount.Text);
+            IniHelper.SetValue("密钥_百度", "secret_key", text_baidupassword.Text);
+            var selectedLang = comboBox_Baidu_Language.SelectedItem?.ToString();
+            var langCode = BaiduOcrHelper.GetStandardLanguages().FirstOrDefault(x => x.Value == selectedLang).Key;
+            IniHelper.SetValue("密钥_百度", "language_code", langCode ?? "CHN_ENG");
 
-			// 【新增】保存百度手写识别密钥
-			IniHelper.SetValue("密钥_百度手写", "secret_id", text_baidu_handwriting_apikey.Text);
-			IniHelper.SetValue("密钥_百度手写", "secret_key", text_baidu_handwriting_secretkey.Text);
-			// 【新增】保存百度手写识别语言设置
-			var selectedHandwritingLang = comboBox_Baidu_Handwriting_Language.SelectedItem?.ToString();
-			var handwritingLangCode = BaiduOcrHelper.GetAccurateLanguages().FirstOrDefault(x => x.Value == selectedHandwritingLang).Key;
-			IniHelper.SetValue("密钥_百度手写", "language_code", handwritingLangCode ?? "CHN_ENG");
+            // 保存百度高精度OCR密钥和语言设置
+            IniHelper.SetValue("密钥_百度高精度", "secret_id", text_baidu_accurate_apikey.Text);
+            IniHelper.SetValue("密钥_百度高精度", "secret_key", text_baidu_accurate_secretkey.Text);
+            var selectedAccurateLang = comboBox_Baidu_Accurate_Language.SelectedItem?.ToString();
+            var accurateLangCode = BaiduOcrHelper.GetAccurateLanguages().FirstOrDefault(x => x.Value == selectedAccurateLang).Key;
+            IniHelper.SetValue("密钥_百度高精度", "language_code", accurateLangCode ?? "CHN_ENG");
 
-			// 保存腾讯OCR密钥和语言设置
-			IniHelper.SetValue("密钥_腾讯", "secret_id", BoxTencentId.Text);
-			IniHelper.SetValue("密钥_腾讯", "secret_key", BoxTencentKey.Text);
-			var selectedTencentLang = comboBox_Tencent_Language.SelectedItem?.ToString();
-			var tencentLangCode = TencentOcrHelper.GetStandardLanguages().FirstOrDefault(x => x.Value == selectedTencentLang).Key;
-			IniHelper.SetValue("密钥_腾讯", "language_code", tencentLangCode ?? "zh");
+            // 保存百度表格识别密钥
+            IniHelper.SetValue("密钥_百度表格", "secret_id", textBox2.Text);
+            IniHelper.SetValue("密钥_百度表格", "secret_key", textBox1.Text);
 
-			// 保存腾讯高精度OCR密钥和语言设置
-			IniHelper.SetValue("密钥_腾讯高精度", "secret_id", text_tencent_accurate_secretid.Text);
-			IniHelper.SetValue("密钥_腾讯高精度", "secret_key", text_tencent_accurate_secretkey.Text);
-			var selectedTencentAccurateLang = comboBox_Tencent_Accurate_Language.SelectedItem?.ToString();
-			var tencentAccurateLangCode = TencentOcrHelper.GetAccurateLanguages().FirstOrDefault(x => x.Value == selectedTencentAccurateLang).Key;
-			IniHelper.SetValue("密钥_腾讯高精度", "language_code", tencentAccurateLangCode ?? "auto");
+            // 【新增】保存百度手写识别密钥
+            IniHelper.SetValue("密钥_百度手写", "secret_id", text_baidu_handwriting_apikey.Text);
+            IniHelper.SetValue("密钥_百度手写", "secret_key", text_baidu_handwriting_secretkey.Text);
+            // 【新增】保存百度手写识别语言设置
+            var selectedHandwritingLang = comboBox_Baidu_Handwriting_Language.SelectedItem?.ToString();
+            var handwritingLangCode = BaiduOcrHelper.GetAccurateLanguages().FirstOrDefault(x => x.Value == selectedHandwritingLang).Key;
+            IniHelper.SetValue("密钥_百度手写", "language_code", handwritingLangCode ?? "CHN_ENG");
 
-			// 保存腾讯表格API密钥信息
-			IniHelper.SetValue("密钥_腾讯表格v3", "secret_id", textBox3.Text);
-			IniHelper.SetValue("密钥_腾讯表格v3", "secret_key", textBox4.Text);
+            // 保存腾讯OCR密钥和语言设置
+            IniHelper.SetValue("密钥_腾讯", "secret_id", BoxTencentId.Text);
+            IniHelper.SetValue("密钥_腾讯", "secret_key", BoxTencentKey.Text);
+            var selectedTencentLang = comboBox_Tencent_Language.SelectedItem?.ToString();
+            var tencentLangCode = TencentOcrHelper.GetStandardLanguages().FirstOrDefault(x => x.Value == selectedTencentLang).Key;
+            IniHelper.SetValue("密钥_腾讯", "language_code", tencentLangCode ?? "zh");
 
-			// 保存白描OCR账号信息
-			IniHelper.SetValue("密钥_白描", "username", BoxBaimiaoUsername.Text);
-			IniHelper.SetValue("密钥_白描", "password", BoxBaimiaoPassword.Text);
-			
-			// 保存代理设置
-			IniHelper.SetValue("代理", "代理类型", combox_代理.Text);
-			IniHelper.SetValue("代理", "服务器", text_服务器.Text);
-			IniHelper.SetValue("代理", "端口", text_端口.Text);
-			IniHelper.SetValue("代理", "需要密码", chbox_代理服务器.Checked.ToString());
-			IniHelper.SetValue("代理", "服务器账号", text_账号.Text);
-			IniHelper.SetValue("代理", "服务器密码", text_密码.Text);
-			
-			// 保存更新设置
-			IniHelper.SetValue("更新", "检测更新", check_检查更新.Checked.ToString());
-			IniHelper.SetValue("更新", "更新间隔", checkBox_更新间隔.Checked.ToString());
-			IniHelper.SetValue("更新", "间隔时间", numbox_间隔时间.Value.ToString());
-			IniHelper.SetValue("更新", "CheckPreRelease", checkBox_PreRelease.Checked.ToString());
-			
-			// 保存截图音效设置
-			IniHelper.SetValue("截图音效", "自动保存", chbox_save.Checked.ToString());
-			IniHelper.SetValue("截图音效", "音效路径", text_音效path.Text);
-			IniHelper.SetValue("截图音效", "粘贴板", chbox_copy.Checked.ToString());
-			
-			// 保存取色器设置
-			if (!chbox_取色.Checked)
+            // 保存腾讯高精度OCR密钥和语言设置
+            IniHelper.SetValue("密钥_腾讯高精度", "secret_id", text_tencent_accurate_secretid.Text);
+            IniHelper.SetValue("密钥_腾讯高精度", "secret_key", text_tencent_accurate_secretkey.Text);
+            var selectedTencentAccurateLang = comboBox_Tencent_Accurate_Language.SelectedItem?.ToString();
+            var tencentAccurateLangCode = TencentOcrHelper.GetAccurateLanguages().FirstOrDefault(x => x.Value == selectedTencentAccurateLang).Key;
+            IniHelper.SetValue("密钥_腾讯高精度", "language_code", tencentAccurateLangCode ?? "auto");
+
+            // 保存腾讯表格API密钥信息
+            IniHelper.SetValue("密钥_腾讯表格v3", "secret_id", textBox3.Text);
+            IniHelper.SetValue("密钥_腾讯表格v3", "secret_key", textBox4.Text);
+
+            // 保存白描OCR账号信息
+            IniHelper.SetValue("密钥_白描", "username", BoxBaimiaoUsername.Text);
+            IniHelper.SetValue("密钥_白描", "password", BoxBaimiaoPassword.Text);
+
+            // 保存代理设置
+            IniHelper.SetValue("代理", "代理类型", combox_代理.Text);
+            IniHelper.SetValue("代理", "服务器", text_服务器.Text);
+            IniHelper.SetValue("代理", "端口", text_端口.Text);
+            IniHelper.SetValue("代理", "需要密码", chbox_代理服务器.Checked.ToString());
+            IniHelper.SetValue("代理", "服务器账号", text_账号.Text);
+            IniHelper.SetValue("代理", "服务器密码", text_密码.Text);
+
+            // 保存更新设置
+            IniHelper.SetValue("更新", "检测更新", check_检查更新.Checked.ToString());
+            IniHelper.SetValue("更新", "更新间隔", checkBox_更新间隔.Checked.ToString());
+            IniHelper.SetValue("更新", "间隔时间", numbox_间隔时间.Value.ToString());
+            IniHelper.SetValue("更新", "CheckPreRelease", checkBox_PreRelease.Checked.ToString());
+
+            // 保存截图音效设置
+            IniHelper.SetValue("截图音效", "自动保存", chbox_save.Checked.ToString());
+            IniHelper.SetValue("截图音效", "音效路径", text_音效path.Text);
+            IniHelper.SetValue("截图音效", "粘贴板", chbox_copy.Checked.ToString());
+
+            // 保存取色器设置
+            if (!chbox_取色.Checked)
+            {
+                IniHelper.SetValue("取色器", "类型", "RGB");
+            }
+            if (chbox_取色.Checked)
+            {
+                IniHelper.SetValue("取色器", "类型", "HEX");
+            }
+
+            // 保存各翻译接口设置
+            IniHelper.SetValue("Translate_Google", "Source", textBox_Google_Source.Text);
+            IniHelper.SetValue("Translate_Google", "Target", textBox_Google_Target.Text);
+
+            IniHelper.SetValue("Translate_Baidu", "Source", textBox_Baidu_Source.Text);
+            IniHelper.SetValue("Translate_Baidu", "Target", textBox_Baidu_Target.Text);
+            IniHelper.SetValue("Translate_Baidu", "APP_ID", textBox_Baidu_AK.Text);
+            IniHelper.SetValue("Translate_Baidu", "APP_KEY", textBox_Baidu_SK.Text);
+
+            IniHelper.SetValue("Translate_Tencent", "Source", textBox_Tencent_Source.Text);
+            IniHelper.SetValue("Translate_Tencent", "Target", textBox_Tencent_Target.Text);
+            IniHelper.SetValue("Translate_Tencent", "SecretId", textBox_Tencent_AK.Text);
+            IniHelper.SetValue("Translate_Tencent", "SecretKey", textBox_Tencent_SK.Text);
+
+            IniHelper.SetValue("Translate_Bing", "Source", textBox_Bing_Source.Text);
+            IniHelper.SetValue("Translate_Bing", "Target", textBox_Bing_Target.Text);
+
+            IniHelper.SetValue("Translate_Bing2", "Source", textBox_Bing2_Source.Text);
+            IniHelper.SetValue("Translate_Bing2", "Target", textBox_Bing2_Target.Text);
+
+            IniHelper.SetValue("Translate_Microsoft", "Source", textBox_Microsoft_Source.Text);
+            IniHelper.SetValue("Translate_Microsoft", "Target", textBox_Microsoft_Target.Text);
+
+            IniHelper.SetValue("Translate_Yandex", "Source", textBox_Yandex_Source.Text);
+            IniHelper.SetValue("Translate_Yandex", "Target", textBox_Yandex_Target.Text);
+
+            // 腾讯交互翻译
+            IniHelper.SetValue("Translate_TencentInteractive", "Source", textBox_TencentInteractive_Source.Text);
+            IniHelper.SetValue("Translate_TencentInteractive", "Target", textBox_TencentInteractive_Target.Text);
+
+            // 彩云小译
+            IniHelper.SetValue("Translate_Caiyun", "Source", textBox_Caiyun_Source.Text);
+            IniHelper.SetValue("Translate_Caiyun", "Target", textBox_Caiyun_Target.Text);
+
+            // 火山翻译
+            IniHelper.SetValue("Translate_Volcano", "Source", textBox_Volcano_Source.Text);
+            IniHelper.SetValue("Translate_Volcano", "Target", textBox_Volcano_Target.Text);
+
+            //百度翻译2
+            IniHelper.SetValue("Translate_Baidu2", "Source", textBox_Baidu2_Source.Text);
+            IniHelper.SetValue("Translate_Baidu2", "Target", textBox_Baidu2_Target.Text);
+
+            // 彩云小译2
+            IniHelper.SetValue("Translate_Caiyun2", "Source", textBox_Caiyun2_Source.Text);
+            IniHelper.SetValue("Translate_Caiyun2", "Target", textBox_Caiyun2_Target.Text);
+            IniHelper.SetValue("Translate_Caiyun2", "Token", textBox_Caiyun2_Token.Text);
+
+            // 保存翻译接口显示设置
+            IniHelper.SetValue("翻译接口显示", "Google", checkBox_ShowGoogle.Checked.ToString());
+            IniHelper.SetValue("翻译接口显示", "Baidu", checkBox_ShowBaidu.Checked.ToString());
+            IniHelper.SetValue("翻译接口显示", "Tencent", checkBox_ShowTencent.Checked.ToString());
+            IniHelper.SetValue("翻译接口显示", "Bing", checkBox_ShowBing.Checked.ToString());
+            IniHelper.SetValue("翻译接口显示", "Bing2", checkBox_ShowBing2.Checked.ToString());
+            IniHelper.SetValue("翻译接口显示", "Microsoft", checkBox_ShowMicrosoft.Checked.ToString());
+            IniHelper.SetValue("翻译接口显示", "Yandex", checkBox_ShowYandex.Checked.ToString());
+            IniHelper.SetValue("翻译接口显示", "TencentInteractive", checkBox_ShowTencentInteractive.Checked.ToString());
+            IniHelper.SetValue("翻译接口显示", "Caiyun", checkBox_ShowCaiyun.Checked.ToString());
+            IniHelper.SetValue("翻译接口显示", "Volcano", checkBox_ShowVolcano.Checked.ToString());
+            IniHelper.SetValue("翻译接口显示", "Caiyun2", checkBox_ShowCaiyun2.Checked.ToString());
+            IniHelper.SetValue("翻译接口显示", "Baidu2", checkBox_ShowBaidu2.Checked.ToString());
+
+            // 保存OCR接口显示设置
+            IniHelper.SetValue("Ocr接口显示", "Baidu", checkBox_ShowOcrBaidu.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "BaiduAccurate", checkBox_ShowOcrBaiduAccurate.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "Tencent", checkBox_ShowOcrTencent.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "TencentAccurate", checkBox_ShowOcrTencentAccurate.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "Baimiao", checkBox_ShowOcrBaimiao.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "Sougou", checkBox_ShowOcrSougou.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "Youdao", checkBox_ShowOcrYoudao.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "WeChat", checkBox_ShowOcrWeChat.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "Mathfuntion", checkBox_ShowOcrMathfuntion.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "Table", checkBox_ShowOcrTable.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "Shupai", checkBox_ShowOcrShupai.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "TableBaidu", checkBox_ShowOcrTableBaidu.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "TableAli", checkBox_ShowOcrTableAli.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "ShupaiLR", checkBox_ShowOcrShupaiLR.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "ShupaiRL", checkBox_ShowOcrShupaiRL.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "TencentTable", checkBox_ShowOcrTableTencent.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "PaddleOCR", checkBox_ShowOcrPaddleOCR.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "PaddleOCR2", checkBox_ShowOcrPaddleOCR2.Checked.ToString());
+            IniHelper.SetValue("Ocr接口显示", "RapidOCR", checkBox_ShowOcrRapidOCR.Checked.ToString());
+
+            // 保存OCR模型配置
+            // PaddleOCR配置
+            IniHelper.SetValue("模型配置_PaddleOCR", "Det", textBox_PaddleOCR_Det.Text);
+            IniHelper.SetValue("模型配置_PaddleOCR", "Cls", textBox_PaddleOCR_Cls.Text);
+            IniHelper.SetValue("模型配置_PaddleOCR", "Rec", textBox_PaddleOCR_Rec.Text);
+            IniHelper.SetValue("模型配置_PaddleOCR", "Keys", textBox_PaddleOCR_Keys.Text);
+            IniHelper.SetValue("模型配置_PaddleOCR", "AdvancedConfig", textBox5.Text);
+
+
+            // PaddleOCR2配置
+            IniHelper.SetValue("模型配置_PaddleOCR2", "Det", textBox_PaddleOCR2_Det.Text);
+            IniHelper.SetValue("模型配置_PaddleOCR2", "Cls", textBox_PaddleOCR2_Cls.Text);
+            IniHelper.SetValue("模型配置_PaddleOCR2", "Rec", textBox_PaddleOCR2_Rec.Text);
+            IniHelper.SetValue("模型配置_PaddleOCR2", "Keys", textBox_PaddleOCR2_Keys.Text);
+            IniHelper.SetValue("模型配置_PaddleOCR2", "AdvancedConfig", textBox6.Text);
+            IniHelper.SetValue("模型配置_PaddleOCR2", "Det_Version", comboBox_PaddleOCR2_det_Version.SelectedItem?.ToString() ?? "v5");
+            IniHelper.SetValue("模型配置_PaddleOCR2", "Cls_Version", comboBox_PaddleOCR2_cls_Version.SelectedItem?.ToString() ?? "v5");
+            IniHelper.SetValue("模型配置_PaddleOCR2", "Rec_Version", comboBox_PaddleOCR2_rec_Version.SelectedItem?.ToString() ?? "v5");
+
+            // RapidOCR配置
+            IniHelper.SetValue("模型配置_RapidOCR", "Det", textBox_RapidOCR_Det.Text);
+            IniHelper.SetValue("模型配置_RapidOCR", "Cls", textBox_RapidOCR_Cls.Text);
+            IniHelper.SetValue("模型配置_RapidOCR", "Rec", textBox_RapidOCR_Rec.Text);
+            IniHelper.SetValue("模型配置_RapidOCR", "Keys", textBox_RapidOCR_Keys.Text);
+            IniHelper.SetValue("模型配置_RapidOCR", "AdvancedConfig", textBox7.Text);
+
+            // 保存OpenAICompatible OCR配置
+            // === 新增：保存自定义 AI 接口列表 ===
+            try
+            {
+                string jsonPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data", "CustomOpenAIProviders.json");
+                string json = JsonConvert.SerializeObject(_customProviders, Formatting.Indented);
+                File.WriteAllText(jsonPath, json);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("保存自定义接口失败: " + ex.Message);
+            }
+            // 保存OpenAICompatible 翻译配置
+            // === 新增：保存自定义 AI 接口列表 ===
+            try
+            {
+                string jsonPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data", "CustomOpenAITransProviders.json");
+                string json = JsonConvert.SerializeObject(_customTransProviders, Formatting.Indented);
+                File.WriteAllText(jsonPath, json);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("保存自定义翻译接口失败: " + ex.Message);
+            }
+
+            //文本改变后自动翻译的延时
+            IniHelper.SetValue("配置", "文本改变自动翻译延时", textBox38.Text);
+            //工具栏图标放大倍数
+            IniHelper.SetValue("工具栏", "图标放大倍数", textBox37.Text);
+			//文字缩放倍数
+			 IniHelper.SetValue("配置", "文字缩放倍数", textBox39.Text);
+
+
+            ResetOcrEngineOnConfigChange();
+            StaticValue.LoadConfig();
+
+           
+        }
+        /// <summary>
+        /// 检测关键配置文件是否位于 Data 目录之外
+        /// </summary>
+        /// <returns>返回外部文件的描述列表，如果为空则表示都在 Data 目录下</returns>
+        /// <summary>
+        /// 全面检测关键数据文件（包括INI配置和JSON中的AI模式文件）是否位于 Data 目录之外
+        /// </summary>
+        /// <returns>返回外部文件的描述列表，如果为空则表示数据都在 Data 目录下</returns>
+        private List<string> CheckForExternalFiles()
+        {
+            List<string> externalFiles = new List<string>();
+
+            // 1. 获取 Data 目录的绝对路径 (作为判断基准)
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            string dataDir = Path.GetFullPath(Path.Combine(baseDir, "Data"));
+
+            // 确保路径以分隔符结尾，防止 "DataBackup" 这种文件夹被误判为在 "Data" 内
+            if (!dataDir.EndsWith(Path.DirectorySeparatorChar.ToString()))
+            {
+                dataDir += Path.DirectorySeparatorChar;
+            }
+            // =========================================================
+            // Part A: 检查 INI 文件中的常规路径配置
+            // =========================================================
+            var iniKeysToCheck = new List<(string Section, string Key, string Description)>
+            {
+                ("模型配置_PaddleOCR", "AdvancedConfig", "PaddleOCR 高级配置文件"),
+                ("模型配置_PaddleOCR2", "AdvancedConfig", "PaddleOCR2 高级配置文件"),
+                ("模型配置_RapidOCR", "AdvancedConfig", "RapidOCR 高级配置文件"),
+            };
+
+            foreach (var item in iniKeysToCheck)
+            {
+                string pathStr = IniHelper.GetValue(item.Section, item.Key);
+                //PaddleOCR 使用默认高级配置文件即默认配置时，弹窗警告
+                if (item.Section == "模型配置_PaddleOCR" && string.IsNullOrWhiteSpace(pathStr))
+                {
+					pathStr = @"PaddleOCR_data\win_x64\inference\PaddleOCR.config.json";
+                }
+                CheckPath(pathStr, $"[INI设置] {item.Description}", baseDir, dataDir, externalFiles);
+            }
+
+            // =========================================================
+            // Part B: 检查 AI 接口 JSON 中的模式文件路径
+            // =========================================================
+
+            // 需要检查的两个 JSON 文件
+            var jsonFiles = new List<(string FileName, string Description)>
 			{
-				IniHelper.SetValue("取色器", "类型", "RGB");
-			}
-			if (chbox_取色.Checked)
-			{
-				IniHelper.SetValue("取色器", "类型", "HEX");
-			}
-			
-			// 保存各翻译接口设置
-			IniHelper.SetValue("Translate_Google", "Source", textBox_Google_Source.Text);
-			IniHelper.SetValue("Translate_Google", "Target", textBox_Google_Target.Text);
-			         
-			IniHelper.SetValue("Translate_Baidu", "Source", textBox_Baidu_Source.Text);
-			IniHelper.SetValue("Translate_Baidu", "Target", textBox_Baidu_Target.Text);
-			IniHelper.SetValue("Translate_Baidu", "APP_ID", textBox_Baidu_AK.Text);
-			IniHelper.SetValue("Translate_Baidu", "APP_KEY", textBox_Baidu_SK.Text);
-	
-			IniHelper.SetValue("Translate_Tencent", "Source", textBox_Tencent_Source.Text);
-			IniHelper.SetValue("Translate_Tencent", "Target", textBox_Tencent_Target.Text);
-			IniHelper.SetValue("Translate_Tencent", "SecretId", textBox_Tencent_AK.Text);
-			IniHelper.SetValue("Translate_Tencent", "SecretKey", textBox_Tencent_SK.Text);
+				("CustomOpenAIProviders.json", "AI OCR 接口配置"),
+				("CustomOpenAITransProviders.json", "AI 翻译接口配置")
+			};
 
-			IniHelper.SetValue("Translate_Bing", "Source", textBox_Bing_Source.Text);
-			IniHelper.SetValue("Translate_Bing", "Target", textBox_Bing_Target.Text);
-			
-			IniHelper.SetValue("Translate_Bing2", "Source", textBox_Bing2_Source.Text);
-			IniHelper.SetValue("Translate_Bing2", "Target", textBox_Bing2_Target.Text);
-			
-			IniHelper.SetValue("Translate_Microsoft", "Source", textBox_Microsoft_Source.Text);
-			IniHelper.SetValue("Translate_Microsoft", "Target", textBox_Microsoft_Target.Text);
+            foreach (var jsonInfo in jsonFiles)
+            {
+                string jsonFilePath = Path.Combine(dataDir, jsonInfo.FileName);
+                if (!File.Exists(jsonFilePath)) continue;
 
-			IniHelper.SetValue("Translate_Yandex", "Source", textBox_Yandex_Source.Text);
-			IniHelper.SetValue("Translate_Yandex", "Target", textBox_Yandex_Target.Text);
-			         
-			// 腾讯交互翻译
-			IniHelper.SetValue("Translate_TencentInteractive", "Source", textBox_TencentInteractive_Source.Text);
-			IniHelper.SetValue("Translate_TencentInteractive", "Target", textBox_TencentInteractive_Target.Text);
-			         
-			// 彩云小译
-			IniHelper.SetValue("Translate_Caiyun", "Source", textBox_Caiyun_Source.Text);
-			IniHelper.SetValue("Translate_Caiyun", "Target", textBox_Caiyun_Target.Text);
-			         
-			// 火山翻译
-			IniHelper.SetValue("Translate_Volcano", "Source", textBox_Volcano_Source.Text);
-			IniHelper.SetValue("Translate_Volcano", "Target", textBox_Volcano_Target.Text);
+                try
+                {
+                    string jsonContent = File.ReadAllText(jsonFilePath);
+                    // 使用 JArray 动态解析，不需要依赖具体的实体类定义
+                    var providers = JArray.Parse(jsonContent);
 
-			//百度翻译2
-			IniHelper.SetValue("Translate_Baidu2", "Source", textBox_Baidu2_Source.Text);
-			IniHelper.SetValue("Translate_Baidu2", "Target", textBox_Baidu2_Target.Text);
+                    foreach (var provider in providers)
+                    {
+                        // 获取接口名称，方便提示
+                        string providerName = provider["Name"]?.ToString() ?? "未命名接口";
+                        // 获取模式文件路径
+                        string modelConfigPath = provider["ModelConfigPath"]?.ToString();
 
-			// 彩云小译2
-			IniHelper.SetValue("Translate_Caiyun2", "Source", textBox_Caiyun2_Source.Text);
-			IniHelper.SetValue("Translate_Caiyun2", "Target", textBox_Caiyun2_Target.Text);
-			IniHelper.SetValue("Translate_Caiyun2", "Token", textBox_Caiyun2_Token.Text);
+                        if (!string.IsNullOrWhiteSpace(modelConfigPath))
+                        {
+                            CheckPath(modelConfigPath,
+                                $"[{jsonInfo.Description}] {providerName} 的模式文件",
+                                baseDir, dataDir, externalFiles);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"解析 {jsonInfo.FileName} 失败: {ex.Message}");
+                }
+            }
 
-			// 保存翻译接口显示设置
-			IniHelper.SetValue("翻译接口显示", "Google", checkBox_ShowGoogle.Checked.ToString());
-			IniHelper.SetValue("翻译接口显示", "Baidu", checkBox_ShowBaidu.Checked.ToString());
-			IniHelper.SetValue("翻译接口显示", "Tencent", checkBox_ShowTencent.Checked.ToString());
-			IniHelper.SetValue("翻译接口显示", "Bing", checkBox_ShowBing.Checked.ToString());
-			IniHelper.SetValue("翻译接口显示", "Bing2", checkBox_ShowBing2.Checked.ToString());
-			IniHelper.SetValue("翻译接口显示", "Microsoft", checkBox_ShowMicrosoft.Checked.ToString());
-			IniHelper.SetValue("翻译接口显示", "Yandex", checkBox_ShowYandex.Checked.ToString());
-			IniHelper.SetValue("翻译接口显示", "TencentInteractive", checkBox_ShowTencentInteractive.Checked.ToString());
-			IniHelper.SetValue("翻译接口显示", "Caiyun", checkBox_ShowCaiyun.Checked.ToString());
-			IniHelper.SetValue("翻译接口显示", "Volcano", checkBox_ShowVolcano.Checked.ToString());
-			IniHelper.SetValue("翻译接口显示", "Caiyun2", checkBox_ShowCaiyun2.Checked.ToString());
-			IniHelper.SetValue("翻译接口显示", "Baidu2", checkBox_ShowBaidu2.Checked.ToString());
+            return externalFiles;
+        }
 
-			// 保存OCR接口显示设置
-			IniHelper.SetValue("Ocr接口显示", "Baidu", checkBox_ShowOcrBaidu.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "BaiduAccurate", checkBox_ShowOcrBaiduAccurate.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "Tencent", checkBox_ShowOcrTencent.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "TencentAccurate", checkBox_ShowOcrTencentAccurate.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "Baimiao", checkBox_ShowOcrBaimiao.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "Sougou", checkBox_ShowOcrSougou.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "Youdao", checkBox_ShowOcrYoudao.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "WeChat", checkBox_ShowOcrWeChat.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "Mathfuntion", checkBox_ShowOcrMathfuntion.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "Table", checkBox_ShowOcrTable.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "Shupai", checkBox_ShowOcrShupai.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "TableBaidu", checkBox_ShowOcrTableBaidu.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "TableAli", checkBox_ShowOcrTableAli.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "ShupaiLR", checkBox_ShowOcrShupaiLR.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "ShupaiRL", checkBox_ShowOcrShupaiRL.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "TencentTable", checkBox_ShowOcrTableTencent.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "PaddleOCR", checkBox_ShowOcrPaddleOCR.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "PaddleOCR2", checkBox_ShowOcrPaddleOCR2.Checked.ToString());
-			IniHelper.SetValue("Ocr接口显示", "RapidOCR", checkBox_ShowOcrRapidOCR.Checked.ToString());
+        /// <summary>
+        /// 辅助方法：验证单个路径是否在 Data 目录外
+        /// </summary>
+        private void CheckPath(string pathStr, string description, string baseDir, string dataDir, List<string> results)
+        {
+            if (string.IsNullOrWhiteSpace(pathStr) || pathStr == "发生错误") return;
 
-			// 保存OCR模型配置
-			// PaddleOCR配置
-			IniHelper.SetValue("模型配置_PaddleOCR", "Det", textBox_PaddleOCR_Det.Text);
-			IniHelper.SetValue("模型配置_PaddleOCR", "Cls", textBox_PaddleOCR_Cls.Text);
-			IniHelper.SetValue("模型配置_PaddleOCR", "Rec", textBox_PaddleOCR_Rec.Text);
-			IniHelper.SetValue("模型配置_PaddleOCR", "Keys", textBox_PaddleOCR_Keys.Text);
-			IniHelper.SetValue("模型配置_PaddleOCR", "AdvancedConfig", textBox5.Text);
-			
-			
-			// PaddleOCR2配置
-			IniHelper.SetValue("模型配置_PaddleOCR2", "Det", textBox_PaddleOCR2_Det.Text);
-			IniHelper.SetValue("模型配置_PaddleOCR2", "Cls", textBox_PaddleOCR2_Cls.Text);
-			IniHelper.SetValue("模型配置_PaddleOCR2", "Rec", textBox_PaddleOCR2_Rec.Text);
-			IniHelper.SetValue("模型配置_PaddleOCR2", "Keys", textBox_PaddleOCR2_Keys.Text);
-			IniHelper.SetValue("模型配置_PaddleOCR2", "AdvancedConfig", textBox6.Text);
-			IniHelper.SetValue("模型配置_PaddleOCR2", "Det_Version", comboBox_PaddleOCR2_det_Version.SelectedItem?.ToString() ?? "v5");
-			IniHelper.SetValue("模型配置_PaddleOCR2", "Cls_Version", comboBox_PaddleOCR2_cls_Version.SelectedItem?.ToString() ?? "v5");
-			IniHelper.SetValue("模型配置_PaddleOCR2", "Rec_Version", comboBox_PaddleOCR2_rec_Version.SelectedItem?.ToString() ?? "v5");
-			
-			// RapidOCR配置
-			IniHelper.SetValue("模型配置_RapidOCR", "Det", textBox_RapidOCR_Det.Text);
-			IniHelper.SetValue("模型配置_RapidOCR", "Cls", textBox_RapidOCR_Cls.Text);
-			IniHelper.SetValue("模型配置_RapidOCR", "Rec", textBox_RapidOCR_Rec.Text);
-			IniHelper.SetValue("模型配置_RapidOCR", "Keys", textBox_RapidOCR_Keys.Text);
-			IniHelper.SetValue("模型配置_RapidOCR", "AdvancedConfig", textBox7.Text);
+            try
+            {
+                // 1. 处理路径：转换为绝对路径
+                string fullPath;
+                if (Path.IsPathRooted(pathStr))
+                {
+                    fullPath = Path.GetFullPath(pathStr);
+                }
+                else
+                {
+                    fullPath = Path.GetFullPath(Path.Combine(baseDir, pathStr));
+                }
 
-			ResetOcrEngineOnConfigChange();
-			DialogResult = DialogResult.OK;
-			StaticValue.LoadConfig();
-		}
+                // 2. 检查文件/文件夹是否存在（不存在的文件不用警告，反正也备份不了）
+                bool exists = File.Exists(fullPath) || Directory.Exists(fullPath);
+                if (!exists) return;
 
-		/// <summary>
-		/// 设置程序是否开机自动启动
-		/// </summary>
-		/// <param name="isAuto">true表示设置为开机自启，false表示取消开机自启</param>
-		public static void AutoStart(bool isAuto)
+                // 3. 核心判断：是否以 Data 目录路径开头
+                if (!fullPath.StartsWith(dataDir, StringComparison.CurrentCultureIgnoreCase))
+                {
+                    results.Add($"{description}:\n    {pathStr}");
+                }
+            }
+            catch(Exception ex)
+            {
+                // 容错处理：防止非法路径字符串导致崩溃
+                Debug.WriteLine($"路径检查出错: {ex.Message}");
+            }
+        }
+        // === 备份（上传）按钮事件 ===
+        private async void btnUploadConfig_Click(object sender, EventArgs e)
+        {   // --- 新增：外部数据检测逻辑开始 ---
+            List<string> externalFiles = CheckForExternalFiles();
+
+            if (externalFiles.Count > 0)
+            {
+             MessageBox.Show(
+            "离线接口的模型、字典、高级配置文件 和 AI接口的模式文件 不在程序的Data目录，不会被备份!!! 请注意手动备份!",
+            "备份范围警告",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information
+			);
+            }
+            //这样有个问题，特例：如果paddleocr接口高级配置文件保持默认空，它也会使用json配置文件，这时externalFiles.Count为0，不会弹窗提醒，这样假如用户修改了默认的高级配置文件，可能会忘记备份.
+			//所以我在上面特殊判断，遇到paddleocr使用默认高级配置文件即默认配置的情况，也添加进来，数量>0.这样就会提醒，不过缺陷就是用户即使没使用过paddleocr，只要没有设置高级配置文件，会一直判断为提醒
+            // --- 新增：外部数据检测逻辑结束 ---
+
+            //防止用户改动设置后没有关闭设置窗口保存就直接点击备份
+            saveSettings();
+            // 1. 获取 WebDav 配置
+            string url = txtWebDavUrl.Text.Trim();
+            string user = txtWebDavUser.Text.Trim();
+            // 如果之前用了加密，这里记得解密；如果是明文，直接用 Text
+            string pass = txtWebDavPass.Text.Trim();
+
+            if (string.IsNullOrEmpty(url))
+            {
+                MessageBox.Show(this,"请先填写 WebDav 地址！");
+                return;
+            }
+            btnUploadConfig.Enabled = false;
+            btnUploadConfig.Text = "正在打包上传...";
+
+            // 2. 确定要备份的本地文件路径
+            string dataDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data");
+			//if (!Directory.Exists(dataDir)) Directory.CreateDirectory(dataDir);
+            // 定义你要备份的文件类型，比如 ini 和 json
+            string[] patterns = new[] { "*.ini", "*.json" };
+            if (!Directory.Exists(dataDir))
+            {
+                MessageBox.Show($"源文件夹不存在：{dataDir}\n无法执行备份。", "提示");
+                return;
+            }
+            btnUploadConfig.Enabled = false;
+            btnUploadConfig.Text = "备份中...";
+
+            try
+            {
+                
+                // 上传带时间戳的备份 
+                bool success = await WebDavHelper.BackupConfigAsync(url, user, pass, dataDir, patterns);
+                if (success)
+                {
+                    MessageBox.Show(this,$"备份成功！\n已上传带时间戳的归档文件。", "成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    // 设置 OK 会关闭窗口 -> 触发 FormClosed -> 再次执行 saveSettings()，增强健壮性-> 主程序收到 OK
+                    this.DialogResult = DialogResult.OK;
+                }
+                //else
+                //{
+                //	MessageBox.Show(this,"备份取消：在 Data 文件夹中未找到符合条件的文件。", "提示");
+                //}
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"备份失败：{ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                btnUploadConfig.Enabled = true;
+                btnUploadConfig.Text = "备份"; // 恢复按钮文字
+            }
+        }
+
+        // === 恢复（下载）按钮事件 ===
+        private async void btnDownloadConfig_Click(object sender, EventArgs e)
+        {
+            string url = txtWebDavUrl.Text.Trim();
+            string user = txtWebDavUser.Text.Trim();
+            string pass = txtWebDavPass.Text.Trim();
+
+            if (string.IsNullOrEmpty(url))
+            {
+                MessageBox.Show(this, "请先填写 WebDav 地址！");
+                return;
+            }
+
+            if (MessageBox.Show(this, "确定要从云端恢复配置吗？\n这将覆盖当前的本地设置！\n如果恢复成功需要重启软件！", "确认恢复", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+            {
+                return;
+            }
+
+            btnDownloadConfig.Enabled = false;
+            btnDownloadConfig.Text = "恢复中...";
+
+            try
+            {
+                string dataDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data");
+
+                // 恢复逻辑：下载 最新zip 并解压覆盖
+                bool success = await WebDavHelper.RestoreLatestConfigAsync(url, user, pass, dataDir);
+                if (success)
+                {
+                    MessageBox.Show(this, "配置恢复成功！软件即将重启刷新状态。", "成功",MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    Application.Restart();
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"恢复失败：{ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                btnDownloadConfig.Enabled = true;
+                btnDownloadConfig.Text = "恢复";
+            }
+        }
+
+        /// <summary>
+        /// 设置程序是否开机自动启动
+        /// </summary>
+        /// <param name="isAuto">true表示设置为开机自启，false表示取消开机自启</param>
+        public static void AutoStart(bool isAuto)
 		{
 			try
 			{
@@ -2543,25 +3561,57 @@ namespace TrOCR
                 button.Text = "button1";
             }
         }
-		/// <summary>
-		/// 读取OCR模型配置
-		/// </summary>
-		private void ReadOcrModelConfigs()
+        // 通用的“失去焦点时尝试转相对路径”事件处理器
+        private void PathTextBox_Leave(object sender, EventArgs e)
+        {
+            if (sender is TextBox tb)
+            {
+                // 1. 去除首尾空格 AND 去除首尾双引号
+                // Windows "复制为路径" 会带引号，必须去掉
+                string inputPath = tb.Text.Trim().Trim('"');
+
+                // 如果用户粘贴了带引号的路径，我们顺手帮他在 UI 上也修正过来
+                if (inputPath != tb.Text)
+                {
+                    tb.Text = inputPath;
+                }
+
+                // 2. 如果内容为空，或者已经是相对路径，直接跳过
+                if (string.IsNullOrEmpty(inputPath) || !Path.IsPathRooted(inputPath))
+                {
+                    return;
+                }
+
+                // 3. 调用转换方法
+                string newPath = TrOCRUtils.ConvertToRelativePathIfPossible(inputPath);
+
+                // 4. 更新 UI
+                if (newPath != inputPath)
+                {
+                    tb.Text = newPath;
+                }
+            }
+        }
+        /// <summary>
+        /// 读取OCR模型配置
+        /// </summary>
+        private void ReadOcrModelConfigs()
 		{
 			// 读取PaddleOCR配置
-			textBox_PaddleOCR_Det.Text = GetConfigValue("模型配置_PaddleOCR", "Det");
-			textBox_PaddleOCR_Cls.Text = GetConfigValue("模型配置_PaddleOCR", "Cls");
-			textBox_PaddleOCR_Rec.Text = GetConfigValue("模型配置_PaddleOCR", "Rec");
-			textBox_PaddleOCR_Keys.Text = GetConfigValue("模型配置_PaddleOCR", "Keys");
-			textBox5.Text = GetConfigValue("模型配置_PaddleOCR", "AdvancedConfig");
+			textBox_PaddleOCR_Det.Text = TrOCRUtils.LoadSetting("模型配置_PaddleOCR", "Det", PaddleOCRHelper.DefaultDetModel);
+			textBox_PaddleOCR_Cls.Text = TrOCRUtils.LoadSetting("模型配置_PaddleOCR", "Cls", PaddleOCRHelper.DefaultClsModel);
+			textBox_PaddleOCR_Rec.Text = TrOCRUtils.LoadSetting("模型配置_PaddleOCR", "Rec", PaddleOCRHelper.DefaultRecModel);
+			textBox_PaddleOCR_Keys.Text = TrOCRUtils.LoadSetting("模型配置_PaddleOCR", "Keys", PaddleOCRHelper.DefaultKeys);
+			textBox5.Text = TrOCRUtils.LoadSetting("模型配置_PaddleOCR", "AdvancedConfig", "");
 
 
 			// 读取PaddleOCR2配置
-			textBox_PaddleOCR2_Det.Text = GetConfigValue("模型配置_PaddleOCR2", "Det");
-			textBox_PaddleOCR2_Cls.Text = GetConfigValue("模型配置_PaddleOCR2", "Cls");
-			textBox_PaddleOCR2_Rec.Text = GetConfigValue("模型配置_PaddleOCR2", "Rec");
-			textBox_PaddleOCR2_Keys.Text = GetConfigValue("模型配置_PaddleOCR2", "Keys");
-			textBox6.Text = GetConfigValue("模型配置_PaddleOCR2", "AdvancedConfig");
+			textBox_PaddleOCR2_Det.Text = TrOCRUtils.LoadSetting("模型配置_PaddleOCR2", "Det", PaddleOCR2Helper.DefaultDetModel);
+			textBox_PaddleOCR2_Cls.Text = TrOCRUtils.LoadSetting("模型配置_PaddleOCR2", "Cls", PaddleOCR2Helper.DefaultClsModel);
+			textBox_PaddleOCR2_Rec.Text = TrOCRUtils.LoadSetting("模型配置_PaddleOCR2", "Rec", PaddleOCR2Helper.DefaultRecModel);
+			textBox_PaddleOCR2_Keys.Text = TrOCRUtils.LoadSetting("模型配置_PaddleOCR2", "Keys", PaddleOCR2Helper.DefaultKeys);
+			textBox6.Text = TrOCRUtils.LoadSetting("模型配置_PaddleOCR2", "AdvancedConfig", "");
+
 			var paddleOcr2DetVersion = GetConfigValue("模型配置_PaddleOCR2", "Det_Version");
 			var paddleOcr2ClsVersion = GetConfigValue("模型配置_PaddleOCR2", "Cls_Version");
 			var paddleOcr2RecVersion = GetConfigValue("模型配置_PaddleOCR2", "Rec_Version");
@@ -2571,11 +3621,11 @@ namespace TrOCR
 
 
 			// 读取RapidOCR配置
-			textBox_RapidOCR_Det.Text = GetConfigValue("模型配置_RapidOCR", "Det");
-			textBox_RapidOCR_Cls.Text = GetConfigValue("模型配置_RapidOCR", "Cls");
-			textBox_RapidOCR_Rec.Text = GetConfigValue("模型配置_RapidOCR", "Rec");
-			textBox_RapidOCR_Keys.Text = GetConfigValue("模型配置_RapidOCR", "Keys");
-			textBox7.Text = GetConfigValue("模型配置_RapidOCR", "AdvancedConfig");
+			textBox_RapidOCR_Det.Text = TrOCRUtils.LoadSetting("模型配置_RapidOCR", "Det",RapidOCRHelper.DefaultDetModel);
+			textBox_RapidOCR_Cls.Text = TrOCRUtils.LoadSetting("模型配置_RapidOCR", "Cls",RapidOCRHelper.DefaultClsModel);
+			textBox_RapidOCR_Rec.Text = TrOCRUtils.LoadSetting("模型配置_RapidOCR", "Rec",RapidOCRHelper.DefaultRecModel);
+			textBox_RapidOCR_Keys.Text = TrOCRUtils.LoadSetting("模型配置_RapidOCR", "Keys",RapidOCRHelper.DefaultKeys);
+			textBox7.Text = TrOCRUtils.LoadSetting("模型配置_RapidOCR", "AdvancedConfig","");
         }
 
         /// <summary>
@@ -2601,8 +3651,8 @@ namespace TrOCR
 
         		// 3. 显示对话框并获取结果
         		if (vistaFolderDialog.ShowDialog() == DialogResult.OK)
-        		{
-        		    textBox.Text = vistaFolderDialog.SelectedPath;
+                {  
+                    textBox.Text = TrOCRUtils.ConvertToRelativePathIfPossible(vistaFolderDialog.SelectedPath); 
         		}
     		}
         }
@@ -2619,7 +3669,7 @@ namespace TrOCR
                 
                 if (openFileDialog.ShowDialog() == DialogResult.OK)
                 {
-                    textBox.Text = openFileDialog.FileName;
+                    textBox.Text = TrOCRUtils.ConvertToRelativePathIfPossible(openFileDialog.FileName);
                 }
             }
         }
@@ -2637,12 +3687,12 @@ namespace TrOCR
 
 				if (openFileDialog.ShowDialog() == DialogResult.OK)
 				{
-					textBox.Text = openFileDialog.FileName;
+					textBox.Text = TrOCRUtils.ConvertToRelativePathIfPossible(openFileDialog.FileName);
 				}
 			}
 		}
 		/// <summary>
-        /// 离线接口浏览高级配置文件的专用方法（只选择json文件）
+        /// AI接口和离线接口浏览高级配置文件的专用方法（只选择json文件）
         /// </summary>
         private void BrowseAdvancedConfigModelFile(TextBox textBox, string description)
         {
@@ -2654,7 +3704,7 @@ namespace TrOCR
                 
                 if (openFileDialog.ShowDialog() == DialogResult.OK)
                 {
-                    textBox.Text = openFileDialog.FileName;
+                    textBox.Text = TrOCRUtils.ConvertToRelativePathIfPossible(openFileDialog.FileName);
                 }
             }
         }
@@ -2692,9 +3742,9 @@ namespace TrOCR
         private void Btn_RapidOCR_Keys_Browse_Click(object sender, EventArgs e) => BrowseKeysModelFile(textBox_RapidOCR_Keys, "RapidOCR字典文件");
 		private void Btn_RapidOCR_AdvancedConfig_Browse_Click(object sender, EventArgs e) => BrowseAdvancedConfigModelFile(textBox7, "RapidOCR高级配置文件");
         private void TextBox_RapidOCR_TextChanged(object sender, EventArgs e)
-		{
-			this.rapidOcrConfigChanged = true;
-		}
+  {
+   this.rapidOcrConfigChanged = true;
+  }
 
         
         /// <summary>
@@ -2793,5 +3843,8 @@ namespace TrOCR
             label_OcrApiHelpText.Text = helpText;
         }
 
+        
+
+       
     }
 }

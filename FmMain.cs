@@ -72,21 +72,26 @@ namespace TrOCR
 	    // 【新增】用于手动计算托盘点击次数的计数器
     	private int trayClickCount = 0;
 
+		private static Size settingWindowSize = new Size(0, 0); // 初始为0，记录设置窗口的大小
 
+        // 定义是否在流式输出
+        private bool isStreaming = false;
+        // 定义是否在流式翻译输出
+        private volatile bool isTransStreaming = false;
 
-		// ====================================================================================================================
-		// **构造函数与窗体事件**
-		//
-		// 负责窗体的初始化、加载、关闭以及核心窗口消息处理（WndProc）。
-		// - FmMain(): 初始化组件、设置初始状态、加载配置、注册剪贴板查看器和热键。
-		// - Load_Click(): 处理窗体加载事件，最小化并隐藏窗体。
-		// - WndProc(): 窗口过程函数，用于处理系统消息，如热键、剪贴板变化、窗口状态改变等。
-		// ====================================================================================================================
-		#region 构造函数与窗体事件
-		/// <summary>
-		/// 初始化FmMain窗体实例，设置初始状态，加载配置并注册剪贴板监视器
-		/// </summary>
-		public FmMain()
+        // ====================================================================================================================
+        // **构造函数与窗体事件**
+        //
+        // 负责窗体的初始化、加载、关闭以及核心窗口消息处理（WndProc）。
+        // - FmMain(): 初始化组件、设置初始状态、加载配置、注册剪贴板查看器和热键。
+        // - Load_Click(): 处理窗体加载事件，最小化并隐藏窗体。
+        // - WndProc(): 窗口过程函数，用于处理系统消息，如热键、剪贴板变化、窗口状态改变等。
+        // ====================================================================================================================
+        #region 构造函数与窗体事件
+        /// <summary>
+        /// 初始化FmMain窗体实例，设置初始状态，加载配置并注册剪贴板监视器
+        /// </summary>
+        public FmMain()
 		{
 			// 初始化标志位
 			set_merge = false;
@@ -121,6 +126,26 @@ namespace TrOCR
 			F_factor = Program.Factor;
 			components = null;
 
+			// 【新增】开启双缓冲，减少闪烁
+			// 加上这个双缓冲,闪烁就变成黑屏了，不加了(ps:更准确的说是黑底，不是黑屏)
+			//SuspendLayout 是解决布局闪烁（控件乱跳）的，而 DoubleBuffered 是解决绘制闪烁（背景重绘）的？不知道对不对
+			//注意：这里开启双缓冲，DoubleBuffered = true 只对 Form（窗体）本身生效，无法遗传给子控件
+			// this.DoubleBuffered = true;
+			//禁止系统擦背景(AllPaintingInWmPaint) + 自己绘制(UserPaint)
+			// this.SetStyle(ControlStyles.UserPaint, true);
+			// this.SetStyle(ControlStyles.AllPaintingInWmPaint, true); 
+			// this.SetStyle(ControlStyles.OptimizedDoubleBuffer, true);
+		    
+			//这个不知道加上有什么用，要不要加：
+            // this.UpdateStyles(); // 强制应用样式
+			
+
+            //  手动设置一个背景色，防止默认黑底
+            // this.BackColor = Color.White;
+			//这个设置的颜色不知道为什么不生效，还是黑底
+			
+			
+
 			// 初始化组件和系统设置
 			InitializeComponent();
 			this.lastNormalSize = this.Size;
@@ -129,11 +154,40 @@ namespace TrOCR
 			// 加载并应用记忆的窗口大小
 			LoadWindowState();
 			LogState("Constructor End (Initial State)"); // <--- 添加这一行
-														 // ====================【新增代码结束】====================
-			translationTimer = new Timer();
-			translationTimer.Interval = 800;
-			translationTimer.Tick += TranslationTimer_Tick;
-			RichBoxBody.richTextBox1.TextChanged += RichBoxBody_TextChanged;
+                                                         // ====================【新增代码结束】====================
+            // 默认给 AI 菜单绑定“未设置ai接口报错事件”
+            // 稍后在 Load 方法里，如果发现有配置，会把它们解绑的
+            this.ai_menu.MouseDown += ShowConfigWarning_MouseDown;
+            this.ai_menu_trans.MouseDown += ShowConfigWarning_MouseDown;
+            if (translationTimer == null)
+            {
+                translationTimer = new Timer();
+                translationTimer.Tick += TranslationTimer_Tick;
+				// 【修改】从 Raw 字符串中解析出基础时间间隔
+				int initDelay = 5000; // 默认安全值 (万一还没加载配置或配置为空)
+				string rawConfig = StaticValue.TextChangeAutotranslateDelayRaw;
+
+				if (!string.IsNullOrWhiteSpace(rawConfig))
+				{
+					// 分割字符串 (处理 "2000,OpenAI" 这种情况)，取逗号前的第一项
+					var parts = rawConfig.Split(new[] { ',', '，' }, StringSplitOptions.RemoveEmptyEntries);
+					
+					// 尝试解析第一个部分为数字
+					if (parts.Length > 0 && int.TryParse(parts[0].Trim(), out int parsedVal))
+					{
+						// 只有大于0才是合法的 Interval
+						if (parsedVal > 0) 
+						{
+							initDelay = parsedVal;
+						}
+					}
+				}
+
+				// 赋值给 Timer (确保 > 0，防止崩溃)
+				translationTimer.Interval = initDelay;
+            }
+
+
 
 			// ====================【新增代码开始】====================
 			clipboardDebounceTimer = new Timer();
@@ -190,14 +244,28 @@ namespace TrOCR
 			this.RichBoxBody_T.TemporaryTranslateRequested += RichBoxBody_T_OnTemporaryTranslateRequested;
 	
 			
-		}
+        }
+        // FmMain.cs
 
-		/// <summary>
-		/// 点击加载按钮时触发的事件处理函数，将窗体最小化并隐藏
-		/// </summary>
-		/// <param name="sender">事件发送者</param>
-		/// <param name="e">事件参数</param>
-		private void Load_Click(object sender, EventArgs e)
+        // 这是一个专门用来“拦截并报错”的事件
+        private void ShowConfigWarning_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left) return;
+
+            // 判断是哪个菜单触发的，显示对应的提示
+            string msg = "检测到您尚未配置 AI 接口。\n\n请先去设置里配置";
+            if (sender == ai_menu_trans) msg = "检测到您尚未配置 AI 翻译接口。\n\n请先去设置里配置";
+
+            MessageBox.Show(msg, "配置提示", MessageBoxButtons.OK, MessageBoxIcon.None);
+
+        }
+
+        /// <summary>
+        /// 点击加载按钮时触发的事件处理函数，将窗体最小化并隐藏
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void Load_Click(object sender, EventArgs e)
 		{
 			WindowState = FormWindowState.Minimized;
 			Visible = false;
@@ -252,22 +320,22 @@ namespace TrOCR
         }
 
 		// 【新增】临时翻译事件的处理器
-private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTranslateEventArgs e)
-{
-            // 【新增调试代码】弹窗显示接收到的语言代码
-            // MessageBox.Show($"接收到临时翻译请求：\n源语言: {e.SourceLanguage}\n目标语言: {e.TargetLanguage}");
-            // 确保翻译的文本是最新的
-            typeset_txt = RichBoxBody.Text;
+		private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTranslateEventArgs e)
+		{
+					// 【新增调试代码】弹窗显示接收到的语言代码
+					// MessageBox.Show($"接收到临时翻译请求：\n源语言: {e.SourceLanguage}\n目标语言: {e.TargetLanguage}");
+					// 确保翻译的文本是最新的
+					typeset_txt = RichBoxBody.Text;
 
-    if (string.IsNullOrWhiteSpace(typeset_txt))
-    {
-        MessageBox.Show("请输入需要翻译的文本！");
-        return;
-    }
+			if (string.IsNullOrWhiteSpace(typeset_txt))
+			{
+				MessageBox.Show("请输入需要翻译的文本！");
+				return;
+			}
 
-    // 调用我们改造后的翻译方法，并传入临时的语言代码
-    trans_Calculate(e.SourceLanguage, e.TargetLanguage);
-}
+			// 调用我们改造后的翻译方法，并传入临时的语言代码
+			trans_Calculate(e.SourceLanguage, e.TargetLanguage);
+		}
         /// <summary>
         /// 重写Windows窗体的消息处理方法，用于处理发送到窗口的各种消息
         /// </summary>
@@ -293,6 +361,17 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			}
 			if (m.Msg == 274 && (int)m.WParam == 61536)
 			{
+				// ====================【新增：窗口关闭/隐藏时解绑事件】====================
+				// 既然窗口都要隐藏了，肯定不需要监听输入了
+				 // 1. 【核心】解绑事件，防止窗口隐藏/恢复过程中的误触
+				RichBoxBody.richTextBox1.TextChanged -= RichBoxBody_TextChanged;
+				
+				// 可选：如果你希望关闭窗口时同时也重置翻译界面（恢复单栏），可以调用这个：
+				// Trans_close_Click(null, null, false); 
+				// 但通常仅仅隐藏窗口保留状态体验更好，所以只解绑事件即可
+				 // 2. 【核心】停止自动翻译计时器，防止后台读秒结束触发翻译
+    			if (translationTimer != null) translationTimer.Stop();
+				// ====================【新增结束】====================
 				WindowState = FormWindowState.Minimized;
 				Visible = false;
 				return;
@@ -530,6 +609,9 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 						WindowState = FormWindowState.Normal;
 						Visible = true;
 						Thread.Sleep(100);
+						 // 2. 【核心修正】在延时之后，窗口绝对稳定了，再绑定
+						RichBoxBody.richTextBox1.TextChanged -= RichBoxBody_TextChanged;
+						RichBoxBody.richTextBox1.TextChanged += RichBoxBody_TextChanged;
 						if (IniHelper.GetValue("工具栏", "顶置") == "False")
 						{
 							TopMost = false;
@@ -538,6 +620,10 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 					}
 					else
 					{
+						// 如果是隐藏窗口的操作，这里也可以顺手解绑（和点X关闭保持一致）
+        				RichBoxBody.richTextBox1.TextChanged -= RichBoxBody_TextChanged;
+						 // 【新增】防止后台读秒
+            			if (translationTimer != null) translationTimer.Stop(); 
 						Hide();
 						Visible = false;
 					}
@@ -574,17 +660,17 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
                     // 如果原文隐藏，则恢复到【硬编码的单栏】默认大小
                     // 计算单栏的默认尺寸
         			newSize = new Size((int)font_base.Width * 23, (int)font_base.Height * 24);
-        			newLastNormalSize = newSize; // ★ 关键：在这里手动计算出正确的基准尺寸
+        			newLastNormalSize = newSize; //  关键：在这里手动计算出正确的基准尺寸
                 }
                 else
                 {
                     // 如果原文可见（双栏），则恢复到【硬编码的双栏】默认大小
                     // 计算双栏的默认尺寸
         			newSize = new Size((int)font_base.Width * 23 * 2, (int)font_base.Height * 24);
-        			newLastNormalSize = new Size(newSize.Width / 2, newSize.Height); // ★ 关键：在这里手动计算出正确的基准尺寸
+        			newLastNormalSize = new Size(newSize.Width / 2, newSize.Height); //  关键：在这里手动计算出正确的基准尺寸
                 }
 				this.Size = newSize; // 更新视觉
-				this.lastNormalSize = newLastNormalSize; // ★ 关键：同步更新数据状态
+				this.lastNormalSize = newLastNormalSize; //  关键：同步更新数据状态
 				Location = (Point)new Size(Screen.PrimaryScreen.Bounds.Width / 2 - Screen.PrimaryScreen.Bounds.Width / 10 * 2, Screen.PrimaryScreen.Bounds.Height / 2 - Screen.PrimaryScreen.Bounds.Height / 6);
 				isProgrammaticResize = false;
 				return;
@@ -622,6 +708,7 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 					new MenuItem("设置", tray_Set_Click),
 					new MenuItem("更新", tray_update_Click),
 					new MenuItem("帮助", tray_help_Click),
+					new MenuItem("重启", trayRestartClick), // 【新增】重启菜单项
 					new MenuItem("退出", trayExitClick)
 				};
 				minico.ContextMenu = new ContextMenu(menuItems);
@@ -637,7 +724,7 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			{
 				return;
 			}
-            // ★★★ 核心修正：在所有操作之前，立刻更新状态 ★★★
+            //  核心修正：在所有操作之前，立刻更新状态 
             isOriginalTextHidden = !isOriginalTextHidden;
             // 暂停窗体的布局逻辑，防止在调整多个控件时发生闪烁
             this.SuspendLayout();
@@ -716,8 +803,11 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 		/// </summary>
 		private void traySilentOcrClick(object sender, EventArgs e)
 		{
-			MainSilentOcr();
-		}
+            MainSilentOcr();
+            // // 抛出一个带有自定义消息的通用异常
+            // throw new Exception("这是一个测试异常，用于验证 PDB 路径映射是否生效！");
+
+        }
 
 		/// <summary>
 		/// 主静默OCR功能
@@ -770,202 +860,233 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 		    MainOCRQuickScreenShots();
 		}
 
-		private async Task<string> GetTranslationAsync(string textToTranslate, string overrideSource = null, string overrideTarget = null)
-		{
-		    // 获取当前使用的翻译服务
-			string transService = StaticValue.Translate_Current_API;
-			string sectionName;
-			// 根据翻译服务名称确定配置节名称
-			switch (transService)
-			{
-				case "谷歌":
-					sectionName = "Google";
-					break;
-				case "百度":
-					sectionName = "Baidu";
-					break;
-				case "腾讯":
-					sectionName = "Tencent";
-					break;
-				case "腾讯交互翻译":
-					sectionName = "TencentInteractive";
-					break;
-				case "彩云小译":
-					sectionName = "Caiyun";
-					break;
-				case "彩云小译2":
-					sectionName = "Caiyun2";
-					break;
-				case "百度2":
-					sectionName = "Baidu2";
-					break;
-				case "火山翻译":
-					sectionName = "Volcano";
-					break;
-				default:
-					sectionName = transService;
-					break;
-			}
+        private async Task<string> GetTranslationAsync(string textToTranslate, string overrideSource = null, string overrideTarget = null)
+        {
+            // 获取当前使用的翻译服务
+            string transService = StaticValue.Translate_Current_API;
+            string sectionName;
+            // 根据翻译服务名称确定配置节名称
+            switch (transService)
+            {
+                case "谷歌":
+                    sectionName = "Google";
+                    break;
+                case "百度":
+                    sectionName = "Baidu";
+                    break;
+                case "腾讯":
+                    sectionName = "Tencent";
+                    break;
+                case "腾讯交互翻译":
+                    sectionName = "TencentInteractive";
+                    break;
+                case "彩云小译":
+                    sectionName = "Caiyun";
+                    break;
+                case "彩云小译2":
+                    sectionName = "Caiyun2";
+                    break;
+                case "百度2":
+                    sectionName = "Baidu2";
+                    break;
+                case "火山翻译":
+                    sectionName = "Volcano";
+                    break;
+                default:
+                    sectionName = transService;
+                    break;
+            }
 
-			// 尝试获取翻译配置，如果不存在则使用默认配置
-			if (!StaticValue.Translate_Configs.TryGetValue(sectionName, out var config))
-			{
-				config = new StaticValue.TranslateConfig { Source = "auto", Target = "自动判断" };
-			}
+            // 尝试获取翻译配置，如果不存在则使用默认配置（非ai接口）
+            if (!StaticValue.Translate_Configs.TryGetValue(sectionName, out var config))
+            {
+                config = new StaticValue.TranslateConfig { Source = "auto", Target = "自动判断" };
+            }
 
-			string toLang;
-			// 【修改】如果临时源语言(overrideSource)不为空，则使用它，否则才用配置文件中的
-			string fromLang = overrideSource ?? config.Source; 
-			// 【修改】优先使用临时目标语言
-			if (!string.IsNullOrEmpty(overrideTarget))
+            string toLang;
+			string fromLang;
+            //如果临时源语言(overrideSource)不为空，则使用它，否则才用配置文件中的
+            if (sectionName != "CustomOpenAI")
 			{
-			    toLang = overrideTarget;
-			}
-			// 根据目标语言配置自动判断需要翻译成的语言
-			else if (config.Target == "自动判断")
-			{
-				toLang = "en"; // 默认翻译为英文
-				if (StaticValue.ZH2EN)
-				{
-					//中文和英文互译逻辑
-					// 中文转英文逻辑：比较中英文字符数量确定源语言
-					if (ch_count(typeset_txt.Trim()) > en_count(typeset_txt.Trim()) || (en_count(typeset_txt.Trim()) == 1 && ch_count(typeset_txt.Trim()) == 1))
-					{
-						toLang = "en";
-					}
-					else
-					{
-						toLang = "zh-CN";
-					}
-				}
-				else if (StaticValue.ZH2JP)
-				{
-					// 中文和日文互译逻辑
-					// 统计中文字符和日文字符数量来判断主要语言
-					string textToCheck = typeset_txt.Trim();
-					int chineseCount = ch_count(textToCheck);
-					// 对于日文，我们需要统计假名的数量，因为汉字在中日文都存在
-					int japaneseKanaCount = 0;
-					foreach (char c in textToCheck)
-					{
-						// 统计平假名 (U+3040-U+309F) 和片假名 (U+30A0-U+30FF)
-						if ((c >= '\u3040' && c <= '\u309F') || (c >= '\u30A0' && c <= '\u30FF'))
-						{
-							japaneseKanaCount++;
-						}
-					}
-
-					// 如果日文假名多于中文字符，说明是日文文本，翻译到中文
-					// 否则翻译到日文
-					if (japaneseKanaCount > 0 && japaneseKanaCount >= chineseCount / 2)
-					{
-						// 有相当数量的假名，判断为日文，翻译到中文
-						toLang = "zh-CN";
-					}
-					else
-					{
-						// 中文字符占主导，翻译到日文
-						toLang = "ja";
-					}
-				}
-				else if (StaticValue.ZH2KO)
-				{
-					// 中文和韩文互译逻辑
-					if (contain_kor(typeset_txt.Trim()))
-					{
-						toLang = "zh-CN";
-					}
-					else
-					{
-						toLang = "ko";
-					}
-				}
+                fromLang = overrideSource ?? config.Source;
 			}
 			else
 			{
-				// 使用配置中指定的目标语言
-				toLang = config.Target;
-			}
+				fromLang= overrideSource ?? _currentCustomTransProvider.Source;
 
-			// 百度和腾讯翻译服务需要特殊处理语言代码
-			if (transService == "百度")
-			{
-				if (fromLang == "zh-CN") fromLang = "zh";
-				if (toLang == "zh-CN") toLang = "zh";
-				if (fromLang == "ja") fromLang = "jp";
-				if (toLang == "ja") toLang = "jp";
-				if (fromLang == "ko") fromLang = "kor";
-				if (toLang == "ko") toLang = "kor";
-			}
-			if (transService == "腾讯")
-			{
-				if (fromLang == "zh-CN") fromLang = "zh";
-				if (toLang == "zh-CN") toLang = "zh";
-			}
+            }
 
-			// 根据翻译服务调用相应的翻译方法
-			switch (transService)
-			{
-				case "谷歌":
-					googleTranslate_txt = await GTranslateHelper.TranslateAsync(typeset_txt, fromLang, toLang, "google");
-					break;
-				case "Bing":
-					googleTranslate_txt = await BingTranslator.TranslateAsync(typeset_txt, fromLang, toLang);
-					break;
-				case "Bing2":
-				case "BingNew":
-					googleTranslate_txt = await BingTranslator2.TranslateAsync(typeset_txt, fromLang, toLang);
-					break;
-				case "Microsoft":
-					googleTranslate_txt = await GTranslateHelper.TranslateAsync(typeset_txt, fromLang, toLang, "microsoft");
-					break;
-				case "Yandex":
-					googleTranslate_txt = await GTranslateHelper.TranslateAsync(typeset_txt, fromLang, toLang, "yandex");
-					break;
-				case "百度":
-					googleTranslate_txt = TranslateBaidu(typeset_txt, fromLang, toLang, config.AppId, config.ApiKey);
-					break;
-				case "腾讯":
-					googleTranslate_txt = Translate_Tencent(typeset_txt, fromLang, toLang, config.AppId, config.ApiKey);
-					break;
-				case "腾讯交互翻译":
-					googleTranslate_txt = await TencentTranslator.TranslateAsync(typeset_txt, fromLang, toLang);
-					break;
-				case "彩云小译":
-					googleTranslate_txt = await CaiyunTranslator.TranslateAsync(typeset_txt, fromLang, toLang);
-					break;
-				case "彩云小译2":
-					if (string.IsNullOrEmpty(config.ApiKey))
-						googleTranslate_txt = "[彩云小译2]：未配置Token";
-					else
-						googleTranslate_txt = await CaiyunTranslator2.TranslateAsync(typeset_txt, fromLang, toLang, config.ApiKey);
-					break;
-				case "火山翻译":
-					googleTranslate_txt = await VolcanoTranslator.TranslateAsync(typeset_txt, fromLang, toLang);
-					break;
-				case "百度2":
-					googleTranslate_txt = await BaiduTranslator2Helper.TranslateAsync(typeset_txt, fromLang, toLang);
-					break;
-				default:
-					googleTranslate_txt = await GTranslateHelper.TranslateAsync(typeset_txt, fromLang, toLang, "google");
-					break;
-			}
-		    return googleTranslate_txt; 
-		}
-		/// <summary>
-		/// 托盘菜单"输入翻译"选项点击事件处理函数
-		/// 重置翻译界面并显示主输入窗口，根据配置填充剪贴板内容
-		/// </summary>
-		/// <param name="sender">事件发送者</param>
-		/// <param name="e">事件参数</param>
-		private void trayInputTranslateClick(object sender, EventArgs e)
+            // 【修改】优先使用临时目标语言
+            if (!string.IsNullOrEmpty(overrideTarget))
+            {
+                toLang = overrideTarget;
+            }
+            // 根据目标语言配置自动判断需要翻译成的语言
+            else if ((sectionName!= "CustomOpenAI" && config.Target == "自动判断")||((sectionName == "CustomOpenAI" && _currentCustomTransProvider.Target == "自动判断")) )
+            {
+                toLang = "en"; // 默认翻译为英文
+                if (StaticValue.ZH2EN)
+                {
+                    //中文和英文互译逻辑
+                    // 中文转英文逻辑：比较中英文字符数量确定源语言
+                    if (ch_count(textToTranslate.Trim()) > en_count(textToTranslate.Trim()) || (en_count(textToTranslate.Trim()) == 1 && ch_count(textToTranslate.Trim()) == 1))
+                    {
+                        toLang = "en";
+                    }
+                    else
+                    {
+                        toLang = "zh-CN";
+                    }
+                }
+                else if (StaticValue.ZH2JP)
+                {
+                    // 中文和日文互译逻辑
+                    // 统计中文字符和日文字符数量来判断主要语言
+                    string textToCheck = textToTranslate.Trim();
+                    int chineseCount = ch_count(textToCheck);
+                    // 对于日文，我们需要统计假名的数量，因为汉字在中日文都存在
+                    int japaneseKanaCount = 0;
+                    foreach (char c in textToCheck)
+                    {
+                        // 统计平假名 (U+3040-U+309F) 和片假名 (U+30A0-U+30FF)
+                        if ((c >= '\u3040' && c <= '\u309F') || (c >= '\u30A0' && c <= '\u30FF'))
+                        {
+                            japaneseKanaCount++;
+                        }
+                    }
+
+                    // 如果日文假名多于中文字符，说明是日文文本，翻译到中文
+                    // 否则翻译到日文
+                    if (japaneseKanaCount > 0 && japaneseKanaCount >= chineseCount / 2)
+                    {
+                        // 有相当数量的假名，判断为日文，翻译到中文
+                        toLang = "zh-CN";
+                    }
+                    else
+                    {
+                        // 中文字符占主导，翻译到日文
+                        toLang = "ja";
+                    }
+                }
+                else if (StaticValue.ZH2KO)
+                {
+                    // 中文和韩文互译逻辑
+                    if (contain_kor(textToTranslate.Trim()))
+                    {
+                        toLang = "zh-CN";
+                    }
+                    else
+                    {
+                        toLang = "ko";
+                    }
+                }
+            }
+            else
+            {
+                // 使用配置中指定的目标语言
+                    if (sectionName == "CustomOpenAI")
+					{	
+						toLang = _currentCustomTransProvider.Target;
+					}
+                    else
+                    {
+                        toLang = config.Target;
+                    }
+            }
+
+            // 百度和腾讯翻译服务需要特殊处理语言代码
+            if (transService == "百度")
+            {
+                if (fromLang == "zh-CN") fromLang = "zh";
+                if (toLang == "zh-CN") toLang = "zh";
+                if (fromLang == "ja") fromLang = "jp";
+                if (toLang == "ja") toLang = "jp";
+                if (fromLang == "ko") fromLang = "kor";
+                if (toLang == "ko") toLang = "kor";
+            }
+            if (transService == "腾讯")
+            {
+                if (fromLang == "zh-CN") fromLang = "zh";
+                if (toLang == "zh-CN") toLang = "zh";
+            }
+            if (transService == "CustomOpenAI")
+            {
+                if (fromLang == "en") fromLang = "英文";
+                if (toLang == "en") toLang = "英文";
+                if (fromLang == "zh-CN") fromLang = "简体中文";
+                if (toLang == "zh-CN") toLang = "简体中文";
+            }
+
+            // 根据翻译服务调用相应的翻译方法
+            switch (transService)
+            {
+                case "谷歌":
+                    googleTranslate_txt = await GTranslateHelper.TranslateAsync(textToTranslate, fromLang, toLang, "google");
+                    break;
+                case "Bing":
+                    googleTranslate_txt = await BingTranslator.TranslateAsync(textToTranslate, fromLang, toLang);
+                    break;
+                case "Bing2":
+                case "BingNew":
+                    googleTranslate_txt = await BingTranslator2.TranslateAsync(textToTranslate, fromLang, toLang);
+                    break;
+                case "Microsoft":
+                    googleTranslate_txt = await GTranslateHelper.TranslateAsync(textToTranslate, fromLang, toLang, "microsoft");
+                    break;
+                case "Yandex":
+                    googleTranslate_txt = await GTranslateHelper.TranslateAsync(textToTranslate, fromLang, toLang, "yandex");
+                    break;
+                case "百度":
+                    googleTranslate_txt = TranslateBaidu(textToTranslate, fromLang, toLang, config.AppId, config.ApiKey);
+                    break;
+                case "腾讯":
+                    googleTranslate_txt = Translate_Tencent(textToTranslate, fromLang, toLang, config.AppId, config.ApiKey);
+                    break;
+                case "腾讯交互翻译":
+                    googleTranslate_txt = await TencentTranslator.TranslateAsync(textToTranslate, fromLang, toLang);
+                    break;
+                case "彩云小译":
+                    googleTranslate_txt = await CaiyunTranslator.TranslateAsync(textToTranslate, fromLang, toLang);
+                    break;
+                case "彩云小译2":
+                    if (string.IsNullOrEmpty(config.ApiKey))
+                        googleTranslate_txt = "[彩云小译2]：未配置Token";
+                    else
+                        googleTranslate_txt = await CaiyunTranslator2.TranslateAsync(textToTranslate, fromLang, toLang, config.ApiKey);
+                    break;
+                case "火山翻译":
+                    googleTranslate_txt = await VolcanoTranslator.TranslateAsync(textToTranslate, fromLang, toLang);
+                    break;
+                case "百度2":
+                    googleTranslate_txt = await BaiduTranslator2Helper.TranslateAsync(textToTranslate, fromLang, toLang);
+                    break;
+                case "CustomOpenAI":
+                    googleTranslate_txt = await Trans_OpenAICompatible(textToTranslate, fromLang, toLang);
+                    break;
+                // =============== 【新增代码结束】 ===============
+                default:
+                    googleTranslate_txt = await GTranslateHelper.TranslateAsync(textToTranslate, fromLang, toLang, "google");
+                    break;
+            }
+            return googleTranslate_txt;
+        }
+        /// <summary>
+        /// 托盘菜单"输入翻译"选项点击事件处理函数
+        /// 重置翻译界面并显示主输入窗口，根据配置填充剪贴板内容
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void trayInputTranslateClick(object sender, EventArgs e)
 		{
 			// 标记这不是OCR流程 
 			isContentFromOcr = false;
 			isFromClipboardListener = false;
 
-			// 1. 重置翻译界面，确保只显示主输入窗口			
-			RichBoxBody_T.Visible = false;
+            // 【新增】重置界面时，确保没有残留的自动翻译任务
+            if (translationTimer != null) translationTimer.Stop();
+
+            // 1. 重置翻译界面，确保只显示主输入窗口			
+            RichBoxBody_T.Visible = false;
 			PictureBox1.Visible = false;
 			RichBoxBody_T.Text = "";
 
@@ -1055,22 +1176,45 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 				TransClick();
 			}
 		}
-		/// <summary>
-		/// 托盘菜单"监听翻译"选项点击事件处理函数
-		/// 用于开启或关闭监听剪贴板进行翻译的功能
-		/// </summary>
-		/// <param name="sender">事件发送者</param>
-		/// <param name="e">事件参数</param>
-		private void trayClipListenTranslateClick(object sender, EventArgs e)
+        /// <summary>
+        /// 停止所有正在运行的逻辑定时器 (用于重置状态、关闭窗口或切换模式时)，暂时不使用.手动处理了
+		/// 最核心的原则是：只要发生了“模式切换”或“窗口状态改变”，都应该注意是否停止 translationTimer等定时器。
+        /// </summary>
+        private void StopAllActiveTimers()
+        {
+            if (translationTimer != null)
+                translationTimer.Stop();
+
+            if (clipboardDebounceTimer != null)
+                clipboardDebounceTimer.Stop();
+
+            // autoCopyLockTimer 一般不需要强制停止，因为它负责释放锁，强制停止可能导致锁死。
+            // trayClickTimer 处理托盘点击，也不建议随意停止。
+        }
+        /// <summary>
+        /// 托盘菜单"监听翻译"选项点击事件处理函数
+        /// 用于开启或关闭监听剪贴板进行翻译的功能
+        /// </summary>
+        /// <param name="sender">事件发送者</param>
+        /// <param name="e">事件参数</param>
+        private void trayClipListenTranslateClick(object sender, EventArgs e)
 		{
 			// 1. 切换核心功能状态 (将 StaticValue 中的布尔值取反)
 			StaticValue.ListenClipboardTranslation = !StaticValue.ListenClipboardTranslation;
 
 			// 2. 持久化设置：将新的状态保存到 config.ini 文件
 			IniHelper.SetValue("配置", "ListenClipboard", StaticValue.ListenClipboardTranslation.ToString());
+            // 【新增】如果用户选择关闭监听，立即停止正在等待的防抖定时器
+            if (!StaticValue.ListenClipboardTranslation)
+            {
+                if (clipboardDebounceTimer != null)
+                {
+                    clipboardDebounceTimer.Stop();
+                }
+            }
 
-			// 3. 给用户一个明确的反馈提示
-			if (StaticValue.ListenClipboardTranslation)
+            // 3. 给用户一个明确的反馈提示
+            if (StaticValue.ListenClipboardTranslation)
 			{
 				CommonHelper.ShowHelpMsg("监听剪贴板翻译已开启");
 			}
@@ -1089,11 +1233,16 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 		private void trayShowClick(object sender, EventArgs e)
 		{
 			Debug.WriteLine("托盘菜单点击了显示主窗口");
-            Show();
+			Show();
 			Activate();
 			Visible = true;
 			WindowState = FormWindowState.Normal;
 			TopMost = IniHelper.GetValue("工具栏", "顶置") == "True";
+		
+			// 1. 【核心修正】等窗口完全显示、状态稳定了，再绑定事件
+			// 这样可以避开 Show() 过程中可能产生的任何“误触”
+			RichBoxBody.richTextBox1.TextChanged -= RichBoxBody_TextChanged; 
+			RichBoxBody.richTextBox1.TextChanged += RichBoxBody_TextChanged; 
 		}
 
 		/// <summary>
@@ -1110,6 +1259,35 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			OcrHelper.Dispose();
 			PaddleOCRHelper.Reset();
 			PaddleOCR2Helper.Reset();
+            RapidOCRHelper.Reset();
+            Process.GetCurrentProcess().Kill();
+		}
+		/// <summary>
+		/// 托盘菜单"重启"选项点击事件处理函数
+		/// 保存配置、释放资源并重启应用程序
+		/// </summary>
+		/// <param name="sender">事件发送者</param>
+		/// <param name="e">事件参数</param>
+		private void trayRestartClick(object sender, EventArgs e)
+		{
+            // 1. 隐藏并释放托盘图标，防止出现“幽灵图标”
+            minico.Visible = false;
+			minico.Dispose();
+            
+            // 2. 保存当前状态
+			saveIniFile();
+			SaveWindowState();
+            
+            // 3. 释放引擎资源
+			OcrHelper.Dispose();
+			PaddleOCRHelper.Reset();
+			PaddleOCR2Helper.Reset();
+            RapidOCRHelper.Reset();
+
+            // 4. 重启应用程序
+            Application.Restart();
+            
+            // 5. 确保当前进程被完全结束
 			Process.GetCurrentProcess().Kill();
 		}
 		#endregion
@@ -1304,92 +1482,7 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			}
 		}
 
-		/// <summary>
-		/// 使用百度OCR服务识别屏幕截图中的文本内容（备用方法，已弃用，忽略即可））
-		/// </summary>
-		public void OCR_baidu_bak()
-		{
-			split_txt = "";
-			try
-			{
-				var str = "CHN_ENG";
-				split_txt = "";
-				var image = image_screen;
-				var array = OcrHelper.ImgToBytes(image);
-				// 根据界面标识设置语言类型
-				switch (interface_flag)
-				{
-					case "中英":
-						str = "CHN_ENG";
-						break;
-					case "日语":
-						str = "JAP";
-						break;
-					case "韩语":
-						str = "KOR";
-						break;
-				}
-				// 构造请求数据并发送到百度OCR接口
-				var data = "type=general_location&image=data" + HttpUtility.UrlEncode(":image/jpeg;base64," + Convert.ToBase64String(array)) + "&language_type=" + str;
-				var value = CommonHelper.PostStrData("http://ai.baidu.com/tech/ocr/general", data);
-				var jArray = JArray.Parse(((JObject)JsonConvert.DeserializeObject(value))["data"]["words_result"].ToString());
-				var str2 = "";
-				var str3 = "";
-				// 处理OCR识别结果
-				foreach (var arr in jArray)
-				{
-					var jObject = JObject.Parse(arr.ToString());
-					var array2 = jObject["words"].ToString().ToCharArray();
-					if (!char.IsPunctuation(array2[array2.Length - 1]))
-					{
-						if (!contain_ch(jObject["words"].ToString()))
-						{
-							str3 = str3 + jObject["words"].ToString().Trim() + " ";
-						}
-						else
-						{
-							str3 += jObject["words"].ToString();
-						}
-					}
-					else if (own_punctuation(array2[array2.Length - 1].ToString()))
-					{
-						if (!contain_ch(jObject["words"].ToString()))
-						{
-							str3 = str3 + jObject["words"].ToString().Trim() + " ";
-						}
-						else
-						{
-							str3 += jObject["words"].ToString();
-						}
-					}
-					else
-					{
-						str3 = str3 + jObject["words"] + "\r\n";
-					}
-					str2 = str2 + jObject["words"] + "\r\n";
-				}
-				split_txt = str2;
-				typeset_txt = str3;
-			}
-			catch
-			{
-				if (esc != "退出")
-				{
-					if (RichBoxBody.Text != "***该区域未发现文本***")
-					{
-						RichBoxBody.Text = "***该区域未发现文本***";
-					}
-				}
-				else
-				{
-					if (RichBoxBody.Text != "***该区域未发现文本***")
-					{
-						RichBoxBody.Text = "***该区域未发现文本***";
-					}
-					esc = "";
-				}
-			}
-		}
+		
 
 		/// <summary>
 		/// 使用百度OCR服务识别屏幕截图中的文本内容
@@ -1504,42 +1597,42 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 		}
 
 
-		/// <summary>
+        /// <summary>
 		/// 处理OCR识别结果
 		/// 将OCR识别出的文本结果进行处理和格式化
-		/// </summary>
+        /// </summary>
 		/// <param name="result">OCR识别出的原始文本结果</param>
-		private void ProcessOcrResult(string result)
-		{
+        private void ProcessOcrResult(string result)
+        {
 			// 将纯文本结果转换为之前的格式进行处理
 			var lines = result.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
-			var jArray = new JArray();
-			foreach (var line in lines)
-			{
+            var jArray = new JArray();
+            foreach (var line in lines)
+            {
 				if (!string.IsNullOrWhiteSpace(line))
-				{
-					var jObject = new JObject();
+                {
+                    var jObject = new JObject();
 					jObject["words"] = line;
-					jArray.Add(jObject);
-				}
-			}
-			
-			if (jArray.Count > 0)
-			{
-				checked_txt(jArray, 1, "words");
-			}
-			else
-			{
-				split_txt = "";
-				typeset_txt = "";
-			}
-		}
+                    jArray.Add(jObject);
+                }
+            }
 
-		/// <summary>
-		/// PaddleOCR离线识别方法
-		/// 使用PaddleOCR引擎进行本地离线文字识别
-		/// </summary>
-		public void OCR_PaddleOCR()
+            if (jArray.Count > 0)
+            {
+                checked_txt(jArray, 1, "words");
+            }
+            else
+            {
+                split_txt = "";
+                typeset_txt = "";
+            }
+        }
+
+        /// <summary>
+        /// PaddleOCR离线识别方法
+        /// 使用PaddleOCR引擎进行本地离线文字识别
+        /// </summary>
+        public void OCR_PaddleOCR()
 		{
 			split_txt = "";
 			try
@@ -1570,9 +1663,12 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 					}
 					else
 					{
-						// 处理识别结果
-						ProcessOcrResult(result);
-					}
+                        // 处理识别结果
+                        //ProcessOcrResult(result);
+                        // 匹配 1次 或 多次 连续的换行
+                        typeset_txt = Regex.Replace(result, @"(\r\n)+", "\r\n");
+                        split_txt = typeset_txt;
+                    }
 				}
 				else
 				{ //这里应该也要改，先标记一下，暂时不改
@@ -1636,9 +1732,12 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 					}
 					else
 					{
-						// 处理识别结果
-						ProcessOcrResult(result);
-					}
+                        // 处理识别结果
+                        //ProcessOcrResult(result);
+                        // 匹配 1次 或 多次 连续的换行
+                        typeset_txt = Regex.Replace(result, @"(\r\n)+", "\r\n");
+                        split_txt = typeset_txt;
+                    }
 				}
 				else
 				{
@@ -1698,9 +1797,12 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 					}
 					else
 					{
-						// 处理识别结果
-						ProcessOcrResult(result);
-					}
+                        // 处理识别结果
+                        //ProcessOcrResult(result);
+                        // 匹配 1次 或 多次 连续的换行
+                        typeset_txt = Regex.Replace(result, @"(\r\n)+", "\r\n");
+                        split_txt = typeset_txt;
+                    }
 				}
 				else
 				{
@@ -1944,6 +2046,8 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 		{
 			OCR_foreach("RapidOCR");
 		}
+
+		
 		#endregion
 // ====================================================================================================================
 		// **文本操作与格式化**
@@ -2118,6 +2222,9 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 		{
 			// 初始化API菜单
 			InitializeApiMenus();
+			// 【新增】加载 AI 动态菜单
+			LoadCustomOpenAIMenus();
+			LoadCustomOpenAITransMenus();
 			
 			// 初始化OCR接口配置
 			interface_flag = GetConfigValueSafely("配置", "接口", "搜狗");
@@ -2261,19 +2368,31 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 		/// <param name="e">事件参数</param>
 		public void tray_Set_Click(object sender, EventArgs e)
 		{
-			// 取消注册所有热键
-			HelpWin32.UnregisterHotKey(Handle, 200);
+            // 取消注册所有热键
+            HelpWin32.UnregisterHotKey(Handle, 200);
 			HelpWin32.UnregisterHotKey(Handle, 205);
 			HelpWin32.UnregisterHotKey(Handle, 206);
 			HelpWin32.UnregisterHotKey(Handle, 235);
 			HelpWin32.UnregisterHotKey(Handle, 240);
 			HelpWin32.UnregisterHotKey(Handle, 250);
 			HelpWin32.UnregisterHotKey(Handle, 260);
+			
 
 			WindowState = FormWindowState.Minimized;
 			var fmSetting = new FmSetting();
+			if (settingWindowSize.Width > 574) 
+			{
+                fmSetting.Size = settingWindowSize;
+			}
 			fmSetting.TopMost = true;
 			fmSetting.ShowDialog();
+            //设置窗口关闭后
+            settingWindowSize = fmSetting.Size; // 窗口关闭后，记录它最后的大小
+
+			
+			 //刷新 AI 菜单，这行代码写在fmsetting里也行，写在这里也行
+			LoadCustomOpenAIMenus();
+			LoadCustomOpenAITransMenus();
 			if (fmSetting.DialogResult == DialogResult.OK)
 			{
 				// 在重新加载配置前，保存旧的百度密钥
@@ -2565,104 +2684,129 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
         }
         public void TransClick(bool hideOriginalDefault =false)
         {
-            LogState("TransClick Start"); // <--- 添加这一行
-            typeset_txt = RichBoxBody.Text;
-			// RichBoxBody_T.Visible = true;
-			WindowState = FormWindowState.Normal;
-			transtalate_fla = "开启";
-			RichBoxBody.Dock = DockStyle.None;
-			RichBoxBody_T.Dock = DockStyle.None;
-			RichBoxBody_T.BorderStyle = BorderStyle.Fixed3D;
-			RichBoxBody_T.Text = "";
-			RichBoxBody.Focus();
-			if (num_ok == 0)
-			{
-				// RichBoxBody.Size = new Size(ClientRectangle.Width, ClientRectangle.Height);
-				// Size = new Size(RichBoxBody.Width * 2, RichBoxBody.Height);
-				this.Size = new Size(this.lastNormalSize.Width * 2, this.lastNormalSize.Height);
-				RichBoxBody_T.Size = new Size(lastNormalSize.Width, lastNormalSize.Height);
-				RichBoxBody_T.Location = (Point)new Size(RichBoxBody.Width, 0);
-				RichBoxBody_T.Name = "rich_trans";
-				RichBoxBody_T.TabIndex = 1;
-				RichBoxBody_T.Text_flag = "我是翻译文本框";
-			}
-			num_ok++;
-			// ====================【新增代码】====================
-    		panelSeparator.Visible = true;
-    		panelSeparator.Dock = DockStyle.Left; // 临时停靠以调整高度
-    		panelSeparator.Dock = DockStyle.None; // 恢复手动布局
-    		// ===============================================
-			// PictureBox1.Visible = true;
-			// PictureBox1.BringToFront();
-			// // ====================【新增代码：动态居中PictureBox1】====================
-			// // 计算X坐标，使其水平居中：(窗口宽度 - 图片框宽度) / 2
-			// int centerX = (this.ClientSize.Width - PictureBox1.Width) / 2;
-			// // 计算Y坐标，使其垂直居中：(窗口高度 - 图片框高度) / 2
-			// int centerY = (this.ClientSize.Height - PictureBox1.Height) / 2;
-			// // 应用新的坐标
-			// PictureBox1.Location = new Point(Math.Max(0, centerX), Math.Max(0, centerY));
-		 // ====================【核心修正区域】====================
+            LogState("TransClick Start");
+            // ====================【修复代码】开始 ====================
+            // 用户手动点击了翻译，说明用户希望立即看到结果。
+            // 此时必须停止自动翻译的倒计时，防止稍后定时器触发导致重复翻译。
+            if (translationTimer != null)
+            {
+                translationTimer.Stop();
+                System.Diagnostics.Debug.WriteLine("用户手动触发翻译，已停止自动翻译定时器");
+            }
+            // ====================【修复代码】结束 ====================
 
-			// 1. 暂停窗体布局，防止在调整多个控件时发生闪烁
-			this.SuspendLayout();
+            // 【优化1】立即暂停布局，阻止任何中间状态的绘制
+            this.SuspendLayout();
 
-		    // 2. 恢复原文窗口为可见状态，并设置双栏布局
-		    RichBoxBody.Visible = true;
-		    this.Size = new Size(this.lastNormalSize.Width * 2, this.lastNormalSize.Height);
-		    RichBoxBody.Width = this.ClientRectangle.Width / 2;
-		    RichBoxBody_T.Left = RichBoxBody.Width;
-		    RichBoxBody_T.Width = RichBoxBody.Width;
+            try
+            {
+                typeset_txt = RichBoxBody.Text;
+                // RichBoxBody_T.Visible = true;
+                transtalate_fla = "开启";
 
-			// 3. 【关键】设置按钮的可见性、状态和初始位置
-			// 【核心修改】只有在全局开关未开启时，才显示和设置按钮
-			if (!StaticValue.DisableToggleOriginalButton)
-			{
-			    btnToggleOriginalText.Visible = true;
-			    btnToggleOriginalText.BringToFront();
-			    isOriginalTextHidden = false;
-			    btnToggleOriginalText.Text = "◀";
-			    // btnToggleOriginalText.Left = RichBoxBody.Right - btnToggleOriginalText.Width - 10;
-			    btnToggleOriginalText.Left = panelSeparator.Left - btnToggleOriginalText.Width - 10;
-			    // btnToggleOriginalText.Top = 5;
-			    // btnToggleOriginalText.Top = 2;
-			}
+				// 【修复】获取当前是否为最大化状态，不要直接强制设为 Normal
+				bool isMaximized = (this.WindowState == FormWindowState.Maximized);
 
+				// 如果不是最大化，才强制设为 Normal（防止最小化时点击没反应等情况）
+				if (!isMaximized)
+				{
+					WindowState = FormWindowState.Normal;
+				}
 
-			// ====================【新增的核心逻辑】====================
-			// 如果参数要求默认隐藏原文，则在显示窗口前，提前模拟一次“隐藏”操作
-			// 【核心修改】增加判断：必须在“显隐按钮”没有被全局禁用的前提下，才执行自动隐藏
-			if (hideOriginalDefault && !StaticValue.DisableToggleOriginalButton)
-			{
-				// 更新状态
-				isOriginalTextHidden = true;
-				btnToggleOriginalText.Text = "▶";
+                // 解除 Dock，准备手动布局
+                RichBoxBody.Dock = DockStyle.None;
+                RichBoxBody_T.Dock = DockStyle.None;
+                RichBoxBody_T.BorderStyle = BorderStyle.Fixed3D;
+                RichBoxBody_T.Text = "";
 
-				// 隐藏原文相关的控件
-				RichBoxBody.Visible = false;
-				panelSeparator.Visible = false;
+                // 确保翻译框已初始化
+                if (num_ok == 0)
+                {
+                    RichBoxBody_T.Name = "rich_trans";
+                    RichBoxBody_T.TabIndex = 1;
+                    RichBoxBody_T.Text_flag = "我是翻译文本框";
+                    // 这里不需要设置 Size/Location，下面统一设置
+                }
+                num_ok++;
 
-				// 提前将窗口设置为最终的单栏尺寸
-				this.Size = this.lastNormalSize;
-				
-				// 提前将译文窗口移动到左侧并填满
-				RichBoxBody_T.Left = 0;
-				RichBoxBody_T.Width = this.ClientRectangle.Width;
-				btnToggleOriginalText.Left = RichBoxBody_T.Right - btnToggleOriginalText.Width;
-			}
-			// =========================================================
-			// 4. 恢复窗体布局，并强制应用所有更改。此时按钮会和文本框一起被正确绘制出来。
-			this.ResumeLayout(true);
+                // 显示分隔条
+                panelSeparator.Visible = true;
+                panelSeparator.Dock = DockStyle.None;
 
-			// ========================================================
-			// MinimumSize = new Size((int)font_base.Width * 23 * 2, (int)font_base.Height * 24);
-			// this.Size = new Size(this.lastNormalSize.Width * 2, this.lastNormalSize.Height);
-			// ====================【核心优化点】====================
-			// 在所有布局都完成后，再调用我们的新方法来定位和显示加载图标
-			PositionLoadingIcon();
-			// ====================================================
+                // ====================【核心布局逻辑】====================
 
-			CheckForIllegalCrossThreadCalls = false;
-			trans_Calculate();
+                // 1. 设置主窗口大小 (此时布局已挂起，界面不会闪烁)
+                this.Size = new Size(this.lastNormalSize.Width * 2, this.lastNormalSize.Height);
+
+                // 2. 统一设置控件位置和大小
+                // 左侧：原文
+                RichBoxBody.Visible = true;
+                RichBoxBody.Location = new Point(0, 0);
+                RichBoxBody.Size = new Size(this.ClientRectangle.Width / 2, this.ClientRectangle.Height);
+
+                // 中间：分隔条 (确保位置紧贴原文)
+                panelSeparator.Location = new Point(RichBoxBody.Right, 0);
+                panelSeparator.Height = this.ClientRectangle.Height;
+
+                // 右侧：译文
+                RichBoxBody_T.Visible = true;
+                RichBoxBody_T.Location = new Point(RichBoxBody.Width, 0); // 或者 panelSeparator.Right
+                RichBoxBody_T.Size = new Size(RichBoxBody.Width, this.ClientRectangle.Height);
+
+                // 3. 设置按钮
+				//只有在全局开关未开启时，才显示和设置按钮
+                if (!StaticValue.DisableToggleOriginalButton)
+                {
+                    btnToggleOriginalText.Visible = true;
+                    btnToggleOriginalText.BringToFront();
+                    isOriginalTextHidden = false;
+                    btnToggleOriginalText.Text = "◀";
+                    // 按钮位置跟随分隔条
+					// btnToggleOriginalText.Left = RichBoxBody.Right - btnToggleOriginalText.Width - 10;
+                    btnToggleOriginalText.Left = panelSeparator.Left - btnToggleOriginalText.Width - 10;
+					// btnToggleOriginalText.Top = 5;//或者2
+                }
+
+                // 4. 处理“默认隐藏原文”的特殊逻辑
+                // 如果参数要求默认隐藏原文，则在显示窗口前，提前模拟一次“隐藏”操作
+                // 【核心修改】增加判断：必须在“显隐按钮”没有被全局禁用的前提下，才执行自动隐藏
+                if (hideOriginalDefault && !StaticValue.DisableToggleOriginalButton)
+                {
+					// 更新状态
+                    isOriginalTextHidden = true;
+                    btnToggleOriginalText.Text = "▶";
+
+                    // 隐藏原文相关的控件
+                    RichBoxBody.Visible = false;
+                    panelSeparator.Visible = false;
+
+                    // 调整回单栏大小
+                    this.Size = this.lastNormalSize;
+
+                    // 译文填满
+                    RichBoxBody_T.Location = new Point(0, 0);
+                    RichBoxBody_T.Size = this.ClientRectangle.Size;
+
+                    // 按钮靠右
+                    btnToggleOriginalText.Left = this.ClientRectangle.Width - btnToggleOriginalText.Width;
+                }
+
+                // =========================================================
+				//开启文本改变事件
+                RichBoxBody.richTextBox1.TextChanged -= RichBoxBody_TextChanged;
+                RichBoxBody.richTextBox1.TextChanged += RichBoxBody_TextChanged;
+                // 定位加载图标
+                PositionLoadingIcon();
+                RichBoxBody.Focus();
+            }
+            finally
+            {
+                // 【优化2】恢复布局并强制立即重绘一次，跳过所有中间帧
+                this.ResumeLayout(true);
+            }
+
+            CheckForIllegalCrossThreadCalls = false;
+            trans_Calculate();
             LogState("TransClick End");
         }
 
@@ -2741,7 +2885,7 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
             // --- 步骤 2: 布局主容器（文本框和分隔条）---
             // 当RichBoxBody未设置停靠样式时调整大小. Dock != Fill 意味着处于双栏翻译模式
             if (RichBoxBody.Dock != DockStyle.Fill)
-            {//  核心修正：在此处添加对 isOriginalTextHidden 状态的判断 ★★★★★
+            {//  核心修正：在此处添加对 isOriginalTextHidden 状态的判断 
                 if (isOriginalTextHidden)
                 {
                     // 特殊状态：翻译模式已开启，但原文被隐藏了
@@ -2835,9 +2979,17 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			PositionLoadingIcon();
 			if (pinyin_flag)
 			{
-				// 如果设置了拼音标志，则将文本转换为拼音
-				googleTranslate_txt = HanToPinyin.GetFullPinyin(typeset_txt);
-			}
+				try
+				{
+                    // 如果设置了拼音标志，则将文本转换为拼音
+                    googleTranslate_txt = HanToPinyin.GetFullPinyin(typeset_txt);
+                }catch (Exception ex)
+				{
+                    System.Diagnostics.Debug.WriteLine("拼音转换出错: " + ex.Message);
+                    googleTranslate_txt = "拼音转换出错：" + ex.Message;
+					pinyin_flag= false;
+                }
+            }
 			else if (string.IsNullOrWhiteSpace(typeset_txt))
 			{
 				// 如果文本为空或只包含空白字符，则翻译结果也为空
@@ -2872,8 +3024,22 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 		{
 			Debug.WriteLine($"Trans_close_Click-----{sender}------{e}");
 			LogState("Trans_close_Click Start"); // <--- 添加这一行
-												 // 只有当这是用户主动点击关闭时 (isUserAction 为 true)，才执行检查
-			if (isUserAction && isOriginalTextHidden)
+            //解绑文本改变事件
+            RichBoxBody.richTextBox1.TextChanged -= RichBoxBody_TextChanged;
+			 // 【新增】防止后台读秒
+            if (translationTimer != null) translationTimer.Stop(); 
+            // 只有当这是用户主动点击关闭时 (isUserAction 为 true)，才执行检查
+            // ====================【新增代码】开始 ====================
+            //这里的代码加不加都行，加上虽然更健壮，但是其实TranslationTimer_Tick里的双重检查就足够了
+            // 1. 强制停止翻译定时器
+            // 这样即使用户在第 9 秒关闭了窗口，第 10 秒也不会触发请求
+            // if (translationTimer != null)
+            // {
+            // 	translationTimer.Stop();
+            // 	Debug.WriteLine("窗口关闭，已强制停止翻译定时器");
+            // }
+            // ====================【新增代码】结束 ====================
+            if (isUserAction && isOriginalTextHidden)
 			{
 				// 如果原文是隐藏的，则弹出提示，并阻止后续的关闭操作
 				MessageBox.Show("请先点击 ▶ 按钮恢复原文，再关闭翻译窗口。", "操作提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -2966,14 +3132,102 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
             }
         }
         /// <summary>
+        /// 解析自动翻译配置字符串，判断当前接口是否允许自动翻译，并获取延时时间
+        /// </summary>
+        /// <param name="configStr">配置字符串 (例如: "1000,百度,谷歌" 或 "1000,-Bing")</param>
+        /// <param name="currentApi">当前选中的翻译接口名称</param>
+        /// <param name="delayMs">输出：解析出的延时时间</param>
+        /// <returns>是否允许自动翻译</returns>
+        private bool CheckTextChangeAutoTranslateConfig(string configStr, string currentApi, out int delayMs)
+        {
+            delayMs = 0;
+            if (string.IsNullOrWhiteSpace(configStr)) return false;
+
+            // 1. 分割字符串，支持中文或英文逗号
+            var parts = configStr.Split(new[] { ',', '，' }, StringSplitOptions.RemoveEmptyEntries)
+                                 .Select(p => p.Trim()) // 去除空格
+                                 .ToArray();
+
+            // 2. 解析时间 (第一部分必须是数字)
+            if (parts.Length == 0 || !int.TryParse(parts[0], out delayMs))
+            {
+                return false; // 格式错误，第一项不是数字
+            }
+
+            // 如果时间 <= 0，直接视为关闭
+            if (delayMs <= 0) return false;
+
+            // 3. 如果只有时间 (例如 "1000")，则对所有接口生效
+            if (parts.Length == 1) return true;
+
+            // 4. 获取后面的接口列表
+            var filters = parts.Skip(1).ToList();
+
+            // 5. 校验格式一致性：要么全是排除(-)，要么全是包含(无-)
+            bool isBlacklist = filters.All(f => f.StartsWith("-"));
+            bool isWhitelist = filters.All(f => !f.StartsWith("-"));
+
+            if (!isBlacklist && !isWhitelist)
+            {
+                // 混用了（例如 "1000,百度,-谷歌"），视为配置错误，为了安全不执行
+                System.Diagnostics.Debug.WriteLine($"[配置错误] 自动翻译配置不能混用黑白名单: {configStr}");
+                return false;
+            }
+
+            // 6. 处理接口名称对比
+            // 去掉开头的 "-" 号，并使用不区分大小写的比较
+            var targetList = filters.Select(f => f.TrimStart('-')).ToHashSet(StringComparer.OrdinalIgnoreCase);
+			//如果是ai翻译接口，判断当前的厂商名
+			if(currentApi== "CustomOpenAI")
+			{
+				currentApi = _currentCustomTransProvider.Name;
+			}
+            if (isWhitelist)
+            {
+                // 白名单模式：当前接口 必须在 列表中才开启
+                // 比如配置 "1000,百度,Bing"，当前是 "百度" -> true
+                return targetList.Contains(currentApi);
+            }
+            else // isBlacklist
+            {
+                // 黑名单模式：当前接口 不能在 列表中才开启
+                // 比如配置 "1000,-Bing"，当前是 "百度" -> true，当前是 "Bing" -> false
+                return !targetList.Contains(currentApi);
+            }
+        }
+        /// <summary>
         /// 原始文本框内容改变事件，用于实现编辑后自动翻译
         /// </summary>
         private void RichBoxBody_TextChanged(object sender, EventArgs e)
-		
 		{
-			// --- 日志: 事件触发入口 ---
-			// 为了日志清晰，将换行符替换为可见的转义字符
-			string currentTextForLog = RichBoxBody.Text.Replace("\r", "\\r").Replace("\n", "\\n");
+            Debug.WriteLine("启动了RichBoxBody_TextChanged");
+            // 【新增】如果正在流式输出，直接忽略，不启动定时器
+            if (isStreaming) return;
+
+            // 【新增】拦截逻辑
+            // 如果 RichBoxBody 正在进行字体切换，直接返回，不启动翻译倒计时
+            if (RichBoxBody.IsFontChanging)
+            {
+                // 可选：打印日志确认拦截成功
+                 System.Diagnostics.Debug.WriteLine("字体切换中，忽略 TextChanged 事件");
+                return;
+            }
+            // === 【修改步骤 1】读取原始配置字符串 ===
+            string rawConfig = StaticValue.TextChangeAutotranslateDelayRaw;
+            // === 【修改步骤 2】调用解析方法 ===
+            // CheckTextChangeAutoTranslateConfig 会处理：
+            // 1. 解析时间，如果非数字或<=0，返回 false
+            // 2. 解析黑白名单，判断当前接口是否允许
+            // 3. 将解析出的时间赋值给 validDelay
+            if (!CheckTextChangeAutoTranslateConfig(rawConfig, StaticValue.Translate_Current_API, out int validDelay))
+            {
+                // 如果不允许（时间为0、格式错误、或当前接口被排除），直接退出
+                return;
+            }
+
+            // --- 日志: 事件触发入口 ---
+            // 为了日志清晰，将换行符替换为可见的转义字符
+            string currentTextForLog = RichBoxBody.Text.Replace("\r", "\\r").Replace("\n", "\\n");
 			Debug.WriteLine($"---> TextChanged 事件触发。文本: \"{currentTextForLog}\" | isContentFromOcr: {isContentFromOcr} | transtalate_fla: {transtalate_fla}");
 			// 关键修复：添加一个“守卫”，如果文本是默认占位符，则直接忽略，不执行任何逻辑。
 			// 这一步不做也行，因为下面2880行做了事件临时解绑。
@@ -2996,7 +3250,13 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 				{
 					Debug.WriteLine("        |--> 文本不为空，准备调用 TransClick() 来打开翻译窗口...");
 					translationTimer.Stop();
-					translationTimer.Start();
+                    // 【修改后新增】在此处动态更新 Timer 的间隔
+                    // 这样可以确保：
+                    // 1. 此时 currentDelay 肯定 > 0，赋值安全，不会崩溃
+                    // 2. 如果用户在设置里修改了时间，这里会立即生效，无需重启
+                    // === 【修改步骤 3】使用解析出的有效时间 ===
+                    translationTimer.Interval = validDelay;
+                    translationTimer.Start();
 				}
 				Debug.WriteLine("    |<-- 场景1 结束,定时器已开始或重置。");
 				Debug.WriteLine("---> TextChanged 事件结束。");
@@ -3015,7 +3275,13 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 				// {
 					Debug.WriteLine("        |--> 满足 [isContentFromOcr 或 autoTranslateInputEnabled]，准备启动/重置 定时器...");
         		    translationTimer.Stop();
-        		    translationTimer.Start();
+                // 【修改后新增】在此处动态更新 Timer 的间隔
+                // 这样可以确保：
+                // 1. 此时 currentDelay 肯定 > 0，赋值安全，不会崩溃
+                // 2. 如果用户在设置里修改了时间，这里会立即生效，无需重启
+                // === 【修改步骤 3】使用解析出的有效时间 ===
+                translationTimer.Interval = validDelay;
+                translationTimer.Start();
 
 					Debug.WriteLine("        |--> 定时器已重置。");
 
@@ -3024,7 +3290,7 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			Debug.WriteLine("---> TextChanged 事件结束。");
 
 		}
-
+		
 		/// <summary>
 		/// 延时翻译定时器的Tick事件，在用户停止输入后触发翻译
 		/// </summary>
@@ -3034,6 +3300,16 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			Debug.WriteLine("===> TranslationTimer_Tick 事件触发！ <===");
 			
 			translationTimer.Stop();
+			// ====================【新增代码】开始 ====================
+    		// 【核心双重保险】
+    		// 检查：如果翻译功能已关闭(transtalate_fla == "关闭") 或者 窗口不可见
+    		// 直接返回，绝不发送请求！
+    		if (transtalate_fla == "关闭" || !this.Visible)
+    		{
+        		Debug.WriteLine("警告：定时器触发时窗口已关闭或隐藏，拦截请求，不执行翻译。");
+        		return; 
+    		}
+    		// ====================【新增代码】结束 ====================
 			// 职责单一：只负责计算和更新翻译结果，不处理UI界面切换
 
 			if (string.IsNullOrWhiteSpace(RichBoxBody.Text))
@@ -3067,79 +3343,113 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 		/// </summary>
 		private void translate_child()
 		{
-			RichBoxBody_T.Visible = false; // 先隐藏
-			
-			RichBoxBody_T.Text = googleTranslate_txt;
-			googleTranslate_txt = "";
-
-			RichBoxBody_T.Visible = true; // 再显示
-
-    		// 翻译完成后的统一自动复制逻辑
-    		bool shouldCopy = false;
-			//截图翻译模式是否自动复制译文
-			if (isScreenshotTranslateMode)
+			try
 			{
-				shouldCopy = StaticValue.AutoCopyScreenshotTranslation;
-			}
-    		// isContentFromOcr 为 true 意味着当前是对OCR结果的翻译（无论是自动还是手动）
-			else if (isContentFromOcr)
-			{
-				// 检查“OCR翻译后复制”选项
-				shouldCopy = StaticValue.AutoCopyOcrTranslation;
-			}
-			else if (isFromClipboardListener)
-			{
-				shouldCopy = StaticValue.AutoCopyListenClipboardTranslation;
-			}
-			else // 两个标志都为 false，则为手动输入,即输入翻译
-			{
-				shouldCopy = StaticValue.AutoCopyInputTranslation;
-			}
+				// 1. 流式输出UI 防闪烁控制
+				// 如果不是流式（普通翻译），可以先隐藏；如果是流式，不隐藏，否则打字机效果打完了会闪一下
+				if (!isTransStreaming)
+				{
+					RichBoxBody_T.Visible = false; // 先隐藏
+				}
 
-    		if (shouldCopy && !string.IsNullOrEmpty(RichBoxBody_T.Text))
-    		{
-				SetClipboardWithLock(RichBoxBody_T.Text);
-				Debug.WriteLine("翻译后复制成功");
 
+				// 2. 赋值逻辑 (防闪烁核心)
+				// 只有在“非流式”或者“流式内容有误(丢包)”的情况下，才强制覆盖文本
+				if (!isTransStreaming || RichBoxBody_T.Text != googleTranslate_txt)
+				{
+					RichBoxBody_T.Text = googleTranslate_txt;
+				}
+				googleTranslate_txt = "";
+
+				RichBoxBody_T.Visible = true; // 再显示
+
+				// 翻译完成后的统一自动复制逻辑
+				bool shouldCopy = false;
+				//截图翻译模式是否自动复制译文
+				if (isScreenshotTranslateMode)
+				{
+					shouldCopy = StaticValue.AutoCopyScreenshotTranslation;
+				}
+				// isContentFromOcr 为 true 意味着当前是对OCR结果的翻译（无论是自动还是手动）
+				else if (isContentFromOcr)
+				{
+					// 检查“OCR翻译后复制”选项
+					shouldCopy = StaticValue.AutoCopyOcrTranslation;
+				}
+				else if (isFromClipboardListener)
+				{
+					shouldCopy = StaticValue.AutoCopyListenClipboardTranslation;
+				}
+				else // 两个标志都为 false，则为手动输入,即输入翻译
+				{
+					shouldCopy = StaticValue.AutoCopyInputTranslation;
+				}
+
+				if (shouldCopy && !string.IsNullOrEmpty(RichBoxBody_T.Text))
+				{
+					SetClipboardWithLock(RichBoxBody_T.Text);
+					Debug.WriteLine("翻译后复制成功");
+
+				}
+
+				// 只有在完成一次OCR翻译流程后，才考虑重置标记。如果不清，连续手动翻译OCR结果和编辑后自动重新翻译也能持续享受自动复制。
+				// 如果希望每次OCR后只有第一次手动翻译能自动复制，可以在这里重置 isContentFromOcr = false;
+				// isContentFromOcr = false;
+
+				// 在每次翻译流程结束后，必须重置监听剪贴板状态标志。否则程序会“卡”在上次的状态，导致后续所有操作逻辑错乱,比如无限翻译。
+				// 只重置“一次性”的事件标志，保留“持续性”的状态标志
+				// 在每次翻译流程结束后，必须重置所有“一次性”的模式标志
+				// 剪贴板监听是一次性事件，必须重置。
+				isFromClipboardListener = false;
+				isScreenshotTranslateMode = false; // 【重要】确保截图翻译的标志也被重置
+
+
+				isOcrTranslation = false; // 重置“自动”翻译标记
+										  
+				
+			}
+			finally
+			{
+                //【状态重置】所有事情做完后，关闭流式标记
+                isTransStreaming = false;
+                if (RichBoxBody_T != null && RichBoxBody_T.richTextBox1 != null)
+                {
+                    RichBoxBody_T.SetToolbarEnabled(true);//恢复翻译框的工具栏
+                    RichBoxBody_T.richTextBox1.ReadOnly = false;
+                }
             }
 
-			// 只有在完成一次OCR翻译流程后，才考虑重置标记。如果不清，连续手动翻译OCR结果和编辑后自动重新翻译也能持续享受自动复制。
-			// 如果希望每次OCR后只有第一次手动翻译能自动复制，可以在这里重置 isContentFromOcr = false;
-			// isContentFromOcr = false;
-		
-		 	// 在每次翻译流程结束后，必须重置监听剪贴板状态标志。否则程序会“卡”在上次的状态，导致后续所有操作逻辑错乱,比如无限翻译。
-    		// 只重置“一次性”的事件标志，保留“持续性”的状态标志
-			 // 在每次翻译流程结束后，必须重置所有“一次性”的模式标志
-    		// 剪贴板监听是一次性事件，必须重置。
-    		isFromClipboardListener = false;
-			isScreenshotTranslateMode = false; // 【重要】确保截图翻译的标志也被重置
-
-		 	
-			isOcrTranslation = false; // 重置“自动”翻译标记
-
-		}
+        }
 		private void HandleClipboardChange()
 		{
 			Debug.WriteLine("HandleClipboardChange执行了");
-			// ====================【关键修复开始】====================
     		// 最优先检查：如果程序正处于自动复制后的静默期，则忽略所有剪贴板事件
     		if (isAutoCopying)
     		{
     		    Debug.WriteLine("忽略剪贴板事件：自动复制锁激活中");
     		    return;
     		}
-    		// ====================【关键修复结束】====================
+    		
 			
-			// 【核心修正】在程序刚启动时，忽略第一次自动触发的剪贴板消息
+			// 在程序刚启动时，忽略第一次自动触发的剪贴板消息
 			if (isAppLoading)
 			{
 				isAppLoading = false; // 将标志位置为false，确保此逻辑只执行一次
-				if (Clipboard.ContainsText())
-				{
-					// 同步初始的剪贴板内容，以便下一次真正的复制可以被正确比较
-					lastClipboardText = Clipboard.GetText();
-				}
-				return; // 关键：直接退出，不执行任何后续的翻译操作
+                // 使用 try-catch 保护剪贴板读取，防止启动时其他程序占用剪贴板导致崩溃
+                try
+                {
+                    if (Clipboard.ContainsText())
+                    {
+                        // 同步初始的剪贴板内容，以便下一次真正的复制可以被正确比较
+                        lastClipboardText = Clipboard.GetText();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine("程序启动时同步剪贴板状态失败: " + ex.Message);
+                    // 启动时读取失败没关系，直接忽略即可，不影响后续监听
+                }
+                return; // 关键：直接退出，不执行任何后续的翻译操作
 			}
 			
 			//  检查功能是否开启
@@ -3148,7 +3458,7 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 				return;
 			}
 
-			// 【核心修改】不立即处理，而是重置防抖定时器
+			// 不立即处理，而是重置防抖定时器
 			// 无论来多少次通知，都只是不断地重置计时器
 			clipboardDebounceTimer.Stop();
 			clipboardDebounceTimer.Start();
@@ -3160,39 +3470,40 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 		    // 1. 首先停止定时器，防止重复执行
 		    clipboardDebounceTimer.Stop();
 
-		    // 2. 在这里执行原来 HandleClipboardChange 中的所有逻辑
-		    if (Clipboard.ContainsText())
-		    {
-		        string clipboardText;
-		        try
-		        {
-		            // 增加try-catch以防止其他程序锁定剪贴板导致崩溃
-		            clipboardText = Clipboard.GetText();
-		        }
-		        catch (Exception ex)
-		        {
-		            Debug.WriteLine("获取剪贴板文本失败: " + ex.Message);
-		            return;
-		        }
+            string clipboardText = null;
 
-				// 检查是否是新的、非空的文本
-				if (!string.IsNullOrEmpty(clipboardText) && clipboardText != lastClipboardText)
-				{
-					// 更新最后一次的文本记录，防止重复触发
-					lastClipboardText = clipboardText;
+            // 2. 将 ContainsText 和 GetText 全部放入 try-catch 中
+            try
+            {
+                if (Clipboard.ContainsText())
+                {
+                    clipboardText = Clipboard.GetText();
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("获取剪贴板文本失败，可能被其他程序占用: " + ex.Message);
+                return; // 获取失败则直接返回，等待下一次用户复制
+            }
 
-					// 显示提示
-					CommonHelper.ShowHelpMsg("已捕获剪贴板，正在翻译...");
+            // 3. 检查是否是新的、非空的文本
+            if (!string.IsNullOrEmpty(clipboardText) && clipboardText != lastClipboardText)
+			{
+				// 更新最后一次的文本记录，防止重复触发
+				lastClipboardText = clipboardText;
 
-					// 设置正确的标志位
-					isContentFromOcr = false;
-					isFromClipboardListener = true;
+				// 显示提示
+				CommonHelper.ShowHelpMsg("已捕获剪贴板，正在翻译...");
 
-					// 调用UI启动方法
-					InitiateTranslationUI(clipboardText);
+				// 设置正确的标志位
+				isContentFromOcr = false;
+				isFromClipboardListener = true;
+
+				// 调用UI启动方法
+				InitiateTranslationUI(clipboardText);
 			
-		        }
 		    }
+		    
 		}
 		/// <summary>
 		/// 显示加载窗口并运行应用程序消息循环
@@ -3951,28 +4262,38 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 		{
 			// 如果正在截图则直接返回
 			if (StaticValue.IsCapture) return;
-			try
+            // 【新增】进入截图模式前，停止所有翻译定时器
+            if (translationTimer != null) translationTimer.Stop();
+            try
 			{
 				// 隐藏主窗口并准备截图
 				change_QQ_screenshot = false;
+
+				// === 纵深防御: 挂起 lastNormalSize 自动更新 ===
+				isProgrammaticResize = true;
+
+				// === 先关闭翻译模式，再操作 FormBorderStyle ===
+				transtalate_fla = "关闭";
+
+				// 如果工具栏翻译功能关闭，则执行关闭翻译操作
+				if (IniHelper.GetValue("工具栏", "翻译") == "False")
+				{
+					Trans_close_Click(null, EventArgs.Empty, false);
+				}
+
+				// === 现在安全地改变 FormBorderStyle ===
 				FormBorderStyle = FormBorderStyle.None;
 				Visible = false;
 				Thread.Sleep(100);
-				
-				// 根据翻译窗口状态设置窗体宽度
-				if (transtalate_fla == "开启")
-				{
-					form_width = Width / 2;
-				}
-				else
-				{
-					form_width = Width;
-				}
+
+				form_width = Width;
 				
 				// 初始化相关变量
 				shupai_Right_txt = "";
 				shupai_Left_txt = "";
 				form_height = Height;
+				// === 恢复 lastNormalSize 自动更新 ===
+				isProgrammaticResize = false;
 				minico.Visible = false;
 				minico.Visible = true;
 				menu.Close();
@@ -3996,22 +4317,11 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 				}
 				finally
 				{
-				    // --- 步骤 3: 无论如何都要重新连接事件处理程序 ---
-				    RichBoxBody.richTextBox1.TextChanged += RichBoxBody_TextChanged;
+				    // 没必要重新绑定了
+				    //RichBoxBody.richTextBox1.TextChanged += RichBoxBody_TextChanged;
 				}
 				
 				
-				RichBoxBody_T.Text = "";
-				typeset_txt = "";
-				transtalate_fla = "关闭";
-				
-				// 如果工具栏翻译功能关闭，则执行关闭翻译操作
-				if (IniHelper.GetValue("工具栏", "翻译") == "False")
-				{
-					// Trans_close.PerformClick();
-					// 【修改3】直接调用新方法
-    				Trans_close_Click(null, EventArgs.Empty, false); 
-				}
 				
 				// 重置窗口大小和边框样式
 				// Size = new Size((int)font_base.Width * 23, (int)font_base.Height * 24);
@@ -4273,10 +4583,12 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 		public void Main_OCR_Thread()
 		{
 			// 优先检查是否为二维码，如果是则直接返回二维码内容
-			if (ScanQRCode() != "")
+			string qrCodeResult = ScanQRCode();
+			if (!string.IsNullOrEmpty(qrCodeResult))
 			{
-				typeset_txt = ScanQRCode();
-				RichBoxBody.Text = typeset_txt;
+				typeset_txt = qrCodeResult;
+                split_txt = qrCodeResult;
+                RichBoxBody.Text = typeset_txt;
 				fmloading.FmlClose = "窗体已关闭";
 				Invoke(new OcrThread(Main_OCR_Thread_last));
 				return;
@@ -4357,6 +4669,17 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 				fmloading.FmlClose = "窗体已关闭";
 				Invoke(new OcrThread(Main_OCR_Thread_last));
 			}
+			if (interface_flag == "CustomOpenAI")
+			{
+				// 调用 FmMain.AI.cs 里的执行方法
+				// OCR_Custom_Router(); 
+				OCR_OpenAICompatible();
+				
+				// 善后工作 (关闭加载窗，显示主窗)
+				fmloading.FmlClose = "窗体已关闭";
+				Invoke(new OcrThread(Main_OCR_Thread_last));
+				return;
+			}
 			// 【新增】百度手写识别的分支
 			if (interface_flag == "百度手写")
 			{
@@ -4415,355 +4738,406 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 		/// OCR识别完成后的处理函数，负责处理识别结果、格式化文本、更新界面和执行后续操作
 		/// </summary>
 		public async void Main_OCR_Thread_last()
-        {
-            LogState("Main_OCR_Thread_last Start"); 
-             // --- 新增的静默模式处理逻辑 ---
-            if (isSilentMode)
+		{
+			try
 			{
-				isSilentMode = false; // 为下一次操作重置标志
-
-				// 检查识别是否成功
-				bool success = typeset_txt != null &&
-							   !typeset_txt.Contains("***该区域未发现文本***") &&
-							   !string.IsNullOrWhiteSpace(typeset_txt);
-
-				if (success)
+				LogState("Main_OCR_Thread_last Start");
+				// --- 新增的静默模式处理逻辑 ---
+				if (isSilentMode)
 				{
-					SetClipboardWithLock(typeset_txt);
-					Debug.WriteLine("静默[OCR] 识别成功，已复制到剪贴板");
-					CommonHelper.ShowHelpMsg("已复制到剪贴板");
+					isSilentMode = false; // 为下一次操作重置标志
+
+					// 检查识别是否成功
+					bool success = typeset_txt != null &&
+								   !typeset_txt.Contains("***该区域未发现文本***") &&
+								   !string.IsNullOrWhiteSpace(typeset_txt);
+
+					if (success)
+					{
+						SetClipboardWithLock(typeset_txt);
+						Debug.WriteLine("静默[OCR] 识别成功，已复制到剪贴板");
+						CommonHelper.ShowHelpMsg("已复制到剪贴板");
+					}
+					else
+					{
+						string errorMessage = string.IsNullOrWhiteSpace(typeset_txt) ? "未识别到文本" : typeset_txt.Replace("***", "").Trim();
+						CommonHelper.ShowHelpMsg("静默识别失败：" + errorMessage);
+					}
+
+					HelpWin32.UnregisterHotKey(Handle, 222); // 注销ESC热键
+					StaticValue.IsCapture = false; // 确保截图状态被重置
+					image_screen?.Dispose(); // 释放图像资源
+					return; // 结束方法，不显示主窗口
+				}
+				// --- 步骤 1: 数据处理和准备 ---
+				// 关键新增：标记当前内容来源于OCR
+				isContentFromOcr = true;
+				isFromClipboardListener = false;
+				image_screen.Dispose();
+				StaticValue.IsCapture = false;
+				var text = typeset_txt;
+				// 【ai流式输出模式下，跳过旧式的标点和空格清洗，信任 AI 的原样输出】
+				if (!isStreaming)
+				{
+					text = check_str(text);
+					split_txt = check_str(split_txt);
+					// 如果文本没有标点符号，则使用拆分后的文本
+					if (!punctuation_has_punctuation(text))
+					{
+						text = split_txt;
+					}
+					// 如果包含中文，则删除空格
+					if (contain_ch(text.Trim()))
+					{
+						text = Del_Space(text);
+					}
+				}
+                StaticValue.v_Split = split_txt;
+
+                string finalTextToShow = text;
+				bool shouldPerformCopy = false;
+				string textToCopy = "";
+
+				var autoTranslate = bool.Parse(IniHelper.GetValue("工具栏", "翻译"));
+				var autoCopyOcr = StaticValue.AutoCopyOcrResult;
+				var autoCopyTranslate = StaticValue.AutoCopyOcrTranslation;
+				// 处理文本拆分选项
+				if ((bool.Parse(IniHelper.GetValue("工具栏", "拆分")) && !isStreaming) || set_split)
+				{
+					set_split = false;
+					finalTextToShow = split_txt;
+					// --- 新增: 拆分后自动复制 ---
+					if (StaticValue.IsSplitAutoCopy && !string.IsNullOrEmpty(finalTextToShow))
+					{
+						shouldPerformCopy = true;
+						textToCopy = finalTextToShow;
+					}
+				}
+				// 处理文本合并选项
+				else if ((bool.Parse(IniHelper.GetValue("工具栏", "合并")) && !isStreaming) || set_merge)
+				{
+					set_merge = false;
+					if (StaticValue.IsMergeRemoveAllSpace)
+					{
+						finalTextToShow = Regex.Replace(text, @"[\r\n 　]+", "");
+					}
+					else
+					{
+						// 只有在“非移除所有空格”模式下，才调用原来的智能合并方法
+						finalTextToShow = PerformIntelligentMerge(text, StaticValue.IsMergeRemoveSpace);
+					}
+
+				}
+
+				// 计算识别耗时
+				var timeSpan = new TimeSpan(DateTime.Now.Ticks);
+				var timeSpan2 = timeSpan.Subtract(ts).Duration();
+				var str = $"{timeSpan2.Seconds}.{Convert.ToInt32(timeSpan2.TotalMilliseconds)}秒";
+
+				// 处理笔记相关功能
+				if (finalTextToShow != null)
+				{
+					p_note(finalTextToShow);
+					StaticValue.v_note = pubnote;
+					if (fmNote.Created)
+					{
+						fmNote.TextNote = "";
+					}
+				}
+				//处理无弹窗配置
+				if (IniHelper.GetValue("配置", "识别弹窗") == "False")
+				{
+					FormBorderStyle = FormBorderStyle.Sizable;
+					// Size = new Size((int)font_base.Width * 23, (int)font_base.Height * 24);
+					this.Size = this.lastNormalSize;
+					Visible = false;
+					RichBoxBody.Text = finalTextToShow;
+					if (RichBoxBody.Text != "***该区域未发现文本***" && !string.IsNullOrWhiteSpace(RichBoxBody.Text))
+					{
+						SetClipboardWithLock(RichBoxBody.Text);
+
+						Debug.WriteLine("无弹窗模式复制识别结果成功");
+						CommonHelper.ShowHelpMsg("已识别并复制");
+					}
+					else
+					{
+						CommonHelper.ShowHelpMsg("无文本");
+					}
+					if (IniHelper.GetValue("快捷键", "翻译文本") != "请按下快捷键")
+					{
+						var value2 = IniHelper.GetValue("快捷键", "翻译文本");
+						var text4 = "None";
+						var text5 = "F9";
+						SetHotkey(text4, text5, value2, 205);
+					}
+					HelpWin32.UnregisterHotKey(Handle, 222);
+					return;
+				}
+
+				// --- 步骤 2: 集中进行所有UI更新 ---
+				// a. 先让窗口框架稳定
+				Text = "耗时：" + str;
+				FormBorderStyle = FormBorderStyle.Sizable;
+				// 在设置尺寸之前记录一次，这是看到 Bug 的关键
+				System.Diagnostics.Debug.WriteLine("Main_OCR_Thread_last: About to set final size.");
+				LogState("Main_OCR_Thread_last Before Set Size");
+				//Size = new Size(form_width, form_height);
+				this.Size = this.lastNormalSize;
+				// 在设置尺寸之后再记录一次
+				LogState("Main_OCR_Thread_last After Set Size");
+				if (StaticValue.v_topmost)
+				{
+					TopMost = true;
 				}
 				else
 				{
-					string errorMessage = string.IsNullOrWhiteSpace(typeset_txt) ? "未识别到文本" : typeset_txt.Replace("***", "").Trim();
-					CommonHelper.ShowHelpMsg("静默识别失败：" + errorMessage);
+					TopMost = false;
 				}
+				minico.Visible = true;
+				Visible = true;
+				Show();
+				WindowState = FormWindowState.Normal;
+				HelpWin32.SetForegroundWindow(Handle);
+                // ====================【核心修改开始】====================
 
-				HelpWin32.UnregisterHotKey(Handle, 222); // 注销ESC热键
-				StaticValue.IsCapture = false; // 确保截图状态被重置
-				image_screen?.Dispose(); // 释放图像资源
-				return; // 结束方法，不显示主窗口
-			}
-			// --- 步骤 1: 数据处理和准备 ---
-			// 关键新增：标记当前内容来源于OCR
-			isContentFromOcr = true;
-    		isFromClipboardListener = false;
-			image_screen.Dispose();
-			StaticValue.IsCapture = false;
-			var text = typeset_txt;
-			text = check_str(text);
-			split_txt = check_str(split_txt);
-			// 如果文本没有标点符号，则使用拆分后的文本
-			if (!punctuation_has_punctuation(text))
-			{
-				text = split_txt;
-			}
-			// 如果包含中文，则删除空格
-			if (contain_ch(text.Trim()))
-			{
-				text = Del_Space(text);
-			}
-			StaticValue.v_Split = split_txt;
+                // a. 隐藏控件，暂停渲染
+                // 非流式才隐藏，防止闪烁
+                if (!isStreaming)
+                {
+                    RichBoxBody.Visible = false;
+                }
 
-			string finalTextToShow = text;
-			bool shouldPerformCopy = false;
-			string textToCopy = "";
+                // b. 在窗口稳定后，再填充文本内容
+                RichBoxBody.richTextBox1.TextChanged -= RichBoxBody_TextChanged;
+                //流式输出时防闪烁赋值逻辑
+                if (!isStreaming || RichBoxBody.Text != finalTextToShow)
+                {
+                    RichBoxBody.Text = finalTextToShow;
+                }
+                // RichBoxBody.richTextBox1.TextChanged += RichBoxBody_TextChanged;
+				
 
-			var autoTranslate = bool.Parse(IniHelper.GetValue("工具栏", "翻译")) ;
-    		var autoCopyOcr = StaticValue.AutoCopyOcrResult;
-    		var autoCopyTranslate = StaticValue.AutoCopyOcrTranslation;
-			// 处理文本拆分选项
-			if (bool.Parse(IniHelper.GetValue("工具栏", "拆分")) || set_split)
-			{
-				set_split = false;
-				finalTextToShow = split_txt;
-				// --- 新增: 拆分后自动复制 ---
-				if (StaticValue.IsSplitAutoCopy && !string.IsNullOrEmpty(finalTextToShow))
+				// c. 处理竖排文本（如果需要）
+				if (interface_flag == "从右向左")
 				{
-					shouldPerformCopy = true;
-					textToCopy = finalTextToShow;
+					RichBoxBody.Text = shupai_Right_txt;
 				}
-			}
-			// 处理文本合并选项
-			else if (bool.Parse(IniHelper.GetValue("工具栏", "合并")) || set_merge)
-			{
-				set_merge = false;
-				if (StaticValue.IsMergeRemoveAllSpace)
-                {
-                    finalTextToShow = Regex.Replace(text, @"[\r\n 　]+", "");
-                }
-                else
-                {
-        		    // 只有在“非移除所有空格”模式下，才调用原来的智能合并方法
-    			    finalTextToShow = PerformIntelligentMerge(text, StaticValue.IsMergeRemoveSpace);
-                }
-    			
-			}
-
-			// 计算识别耗时
-			var timeSpan = new TimeSpan(DateTime.Now.Ticks);
-			var timeSpan2 = timeSpan.Subtract(ts).Duration();
-			var str = $"{timeSpan2.Seconds}.{Convert.ToInt32(timeSpan2.TotalMilliseconds)}秒";
-
-			// 处理笔记相关功能
-			if (finalTextToShow != null)
-			{
-				p_note(finalTextToShow);
-				StaticValue.v_note = pubnote;
-				if (fmNote.Created)
+				if (interface_flag == "从左向右")
 				{
-					fmNote.TextNote = "";
+					RichBoxBody.Text = shupai_Left_txt;
 				}
-			}
-            //处理无弹窗配置
-            if (IniHelper.GetValue("配置", "识别弹窗") == "False")
-            {
-                FormBorderStyle = FormBorderStyle.Sizable;
-                // Size = new Size((int)font_base.Width * 23, (int)font_base.Height * 24);
-                this.Size = this.lastNormalSize;
-                Visible = false;
-				RichBoxBody.Text = finalTextToShow;
-                if (RichBoxBody.Text != "***该区域未发现文本***" && !string.IsNullOrWhiteSpace(RichBoxBody.Text))
-                {
-                    SetClipboardWithLock(RichBoxBody.Text);
+				// (可选) 强制滚动到底部或顶部，有助于解决滚动条问题
+				// RichBoxBody.SelectionStart = 0;
+				// RichBoxBody.ScrollToCaret();
 
-                    Debug.WriteLine("无弹窗模式复制识别结果成功");
-                    CommonHelper.ShowHelpMsg("已识别并复制");
-                }
-                else
-                {
-                    CommonHelper.ShowHelpMsg("无文本");
-                }
-                if (IniHelper.GetValue("快捷键", "翻译文本") != "请按下快捷键")
-                {
-                    var value2 = IniHelper.GetValue("快捷键", "翻译文本");
-                    var text4 = "None";
-                    var text5 = "F9";
-                    SetHotkey(text4, text5, value2, 205);
-                }
-                HelpWin32.UnregisterHotKey(Handle, 222);
-                return;
-            }
+				// 3. 再次显示控件，强制进行一次完整的、干净的重绘
+				RichBoxBody.Visible = true;
+				// 检查是否为截图翻译模式(初版)
+				// if (isScreenshotTranslateMode)
+				// {
+				//     // 检查OCR是否成功获取到文本
+				//     bool success = !string.IsNullOrWhiteSpace(finalTextToShow) && 
+				//                    !finalTextToShow.Contains("***该区域未发现文本***");
 
-            // --- 步骤 2: 集中进行所有UI更新 ---
+				//     if (success)
+				//     {
+				//         // OCR成功，执行核心操作：
+				//         // 1. 将OCR结果放入原文框
+				//         RichBoxBody.Text = finalTextToShow;
 
-            // a. 先让窗口框架稳定
-            Text = "耗时：" + str;
-			FormBorderStyle = FormBorderStyle.Sizable;
-            // 在设置尺寸之前记录一次，这是看到 Bug 的关键
-            System.Diagnostics.Debug.WriteLine("Main_OCR_Thread_last: About to set final size.");
-            LogState("Main_OCR_Thread_last Before Set Size");
-            //Size = new Size(form_width, form_height);
-			this.Size = this.lastNormalSize;
-            // 在设置尺寸之后再记录一次
-            LogState("Main_OCR_Thread_last After Set Size");
-            if (StaticValue.v_topmost)
-			{
-				TopMost = true;
-			}
-			else
-			{
-				TopMost = false;
-			}
-			minico.Visible = true;
-			Visible = true;
-			Show();
-			WindowState = FormWindowState.Normal;
-			HelpWin32.SetForegroundWindow(Handle);
-			// ====================【核心修改开始】====================
-    
-    		// 1. 隐藏控件，暂停渲染
-    		RichBoxBody.Visible = false;
+				//         // 2. 调用翻译方法，并传入 true 来默认隐藏原文
+				//         TransClick(true); 
+				//     }
+				//     else
+				//     {
+				//         // OCR失败，给用户一个提示，但不显示主窗口
+				//         string errorMessage = string.IsNullOrWhiteSpace(typeset_txt) ? "未识别到文本" : typeset_txt.Replace("***", "").Trim();
+				//         CommonHelper.ShowHelpMsg("截图翻译失败：" + errorMessage);
+				//     }
 
-			// b. 在窗口稳定后，再填充文本内容
-			RichBoxBody.richTextBox1.TextChanged -= RichBoxBody_TextChanged;
-			RichBoxBody.Text = finalTextToShow;
-			RichBoxBody.richTextBox1.TextChanged += RichBoxBody_TextChanged;
+				//     // 清理并退出，不再执行后续的常规显示逻辑
+				//     HelpWin32.UnregisterHotKey(Handle, 222); 
+				//     StaticValue.IsCapture = false; 
+				//     image_screen?.Dispose();
+				//     return; // 【关键】直接返回，中断后续的标准流程
+				// }
+				// 检查是否为截图翻译模式（包含了显示窗口和不显示窗口两种情况）
+				if (isScreenshotTranslateMode)
+				{
+					bool success = !string.IsNullOrWhiteSpace(finalTextToShow) &&
+								   !finalTextToShow.Contains("***该区域未发现文本***");
 
-			// c. 处理竖排文本（如果需要）
-			if (interface_flag == "从右向左")
-			{
-				RichBoxBody.Text = shupai_Right_txt;
-			}
-			if (interface_flag == "从左向右")
-			{
-				RichBoxBody.Text = shupai_Left_txt; 
-			}
-			 // (可选) 强制滚动到底部或顶部，有助于解决滚动条问题
-    		// RichBoxBody.SelectionStart = 0;
-    		// RichBoxBody.ScrollToCaret();
-
-    		// 3. 再次显示控件，强制进行一次完整的、干净的重绘
-    		RichBoxBody.Visible = true;
-			// 检查是否为截图翻译模式(初版)
-    // if (isScreenshotTranslateMode)
-    // {
-    //     // 检查OCR是否成功获取到文本
-    //     bool success = !string.IsNullOrWhiteSpace(finalTextToShow) && 
-    //                    !finalTextToShow.Contains("***该区域未发现文本***");
-
-    //     if (success)
-    //     {
-    //         // OCR成功，执行核心操作：
-    //         // 1. 将OCR结果放入原文框
-    //         RichBoxBody.Text = finalTextToShow;
-            
-    //         // 2. 调用翻译方法，并传入 true 来默认隐藏原文
-    //         TransClick(true); 
-    //     }
-    //     else
-    //     {
-    //         // OCR失败，给用户一个提示，但不显示主窗口
-    //         string errorMessage = string.IsNullOrWhiteSpace(typeset_txt) ? "未识别到文本" : typeset_txt.Replace("***", "").Trim();
-    //         CommonHelper.ShowHelpMsg("截图翻译失败：" + errorMessage);
-    //     }
-
-    //     // 清理并退出，不再执行后续的常规显示逻辑
-    //     HelpWin32.UnregisterHotKey(Handle, 222); 
-    //     StaticValue.IsCapture = false; 
-    //     image_screen?.Dispose();
-    //     return; // 【关键】直接返回，中断后续的标准流程
-    // }
-			// 检查是否为截图翻译模式（包含了显示窗口和不显示窗口两种情况）
-			if (isScreenshotTranslateMode)
-			{
-			    bool success = !string.IsNullOrWhiteSpace(finalTextToShow) && 
-			                   !finalTextToShow.Contains("***该区域未发现文本***");
-
-			    if (success)
-			    {
-					// 根据“不显示窗口”的设置决定走哪个流程
-					if (StaticValue.NoWindowScreenshotTranslation)
+					if (success)
 					{
-						// 【流程 A：不显示窗口，直接复制（真·静默翻译）】
-						this.Hide();
-						// 或者
-						// this.Visible = false;
-						
-						// 异步获取翻译结果
-						string translationResult = await GetTranslationAsync(finalTextToShow);
-
-						// 检查翻译是否成功，这行代码会等到翻译完成后才执行，此时 translationResult 是有值的
-						if (!string.IsNullOrEmpty(translationResult) && !translationResult.Contains("]："))
+						// 根据“不显示窗口”的设置决定走哪个流程
+						if (StaticValue.NoWindowScreenshotTranslation)
 						{
-							SetClipboardWithLock(translationResult);
-							CommonHelper.ShowHelpMsg("译文已复制");
+							// 【流程 A：不显示窗口，直接复制（真·静默翻译）】
+							this.Hide();
+							// 或者
+							// this.Visible = false;
+
+							// 异步获取翻译结果
+							string translationResult = await GetTranslationAsync(finalTextToShow);
+
+							// 检查翻译是否成功，这行代码会等到翻译完成后才执行，此时 translationResult 是有值的
+							if (!string.IsNullOrEmpty(translationResult) && !translationResult.Contains("]："))
+							{
+								SetClipboardWithLock(translationResult);
+								CommonHelper.ShowHelpMsg("译文已复制");
+							}
+							else
+							{
+								// 如果翻译出错，也提示用户
+								CommonHelper.ShowHelpMsg("翻译失败：" + translationResult);
+							}
+							// 【关键修正】在此流程的末尾，手动重置标志位
+							isScreenshotTranslateMode = false;
 						}
 						else
 						{
-							// 如果翻译出错，也提示用户
-							CommonHelper.ShowHelpMsg("翻译失败：" + translationResult);
+							// 【流程 B：显示窗口】
+
+							// 1. 将OCR结果放入原文框
+							RichBoxBody.Text = finalTextToShow;
+
+							// 2. 调用翻译方法，并传入 true 来默认隐藏原文
+							TransClick(true);
 						}
-						// 【关键修正】在此流程的末尾，手动重置标志位
-            			isScreenshotTranslateMode = false;
-        			}
+					}
 					else
 					{
-						// 【流程 B：显示窗口】
-
-						// 1. 将OCR结果放入原文框
-						RichBoxBody.Text = finalTextToShow;
-
-						// 2. 调用翻译方法，并传入 true 来默认隐藏原文
-						TransClick(true);
+						// OCR失败，不会有翻译流程，所以在这里重置标志是安全的
+						isScreenshotTranslateMode = false;
+						// OCR失败的提示
+						string errorMessage = string.IsNullOrWhiteSpace(typeset_txt) ? "未识别到文本" : typeset_txt.Replace("***", "").Trim();
+						CommonHelper.ShowHelpMsg("截图翻译失败：" + errorMessage);
 					}
-    			}
-    			else
-    			{
-					// OCR失败，不会有翻译流程，所以在这里重置标志是安全的
-    			    isScreenshotTranslateMode = false;
-    			    // OCR失败的提示
-    			    string errorMessage = string.IsNullOrWhiteSpace(typeset_txt) ? "未识别到文本" : typeset_txt.Replace("***", "").Trim();
-    			    CommonHelper.ShowHelpMsg("截图翻译失败：" + errorMessage);
-    			}
 
-    			// 统一的清理工作
-    			HelpWin32.UnregisterHotKey(Handle, 222); 
-    			StaticValue.IsCapture = false; 
-    			image_screen?.Dispose();
-    			return; // 中断后续的标准流程
-			}
+					// 统一的清理工作
+					HelpWin32.UnregisterHotKey(Handle, 222);
+					StaticValue.IsCapture = false;
+					image_screen?.Dispose();
+					return; // 中断后续的标准流程
+				}
 
-			// ====================【核心修改结束】====================
+				// ====================【核心修改结束】====================
 
-			// 原有的 RichBoxBody.Refresh() 不再需要，可以删除
+				// 原有的 RichBoxBody.Refresh() 不再需要，可以删除
 
-			// --- 步骤 3: 在UI完全稳定后，才执行所有可能阻塞的操作（如剪贴板） ---
+				// --- 步骤 3: 在UI完全稳定后，才执行所有可能阻塞的操作（如剪贴板） ---
 
-			if (shouldPerformCopy)
-			{
-				SetClipboardWithLock(textToCopy);
-				Debug.WriteLine("拆分后自动复制成功");
-
-			}
-			else
-			{
-				//// 处理识别后自动复制功能 (只有同时开启了 ① 识别后自动复制 和 ② 自动翻译 和 ③ 翻译后自动复制，才不复制识别结果)
-				if (autoCopyOcr && (!autoTranslate || !autoCopyTranslate))
+				if (shouldPerformCopy)
 				{
-					SetClipboardWithLock(RichBoxBody.Text);
-					Debug.WriteLine("识别后自动复制成功");
+					SetClipboardWithLock(textToCopy);
+					Debug.WriteLine("拆分后自动复制成功");
 
 				}
-			}
+				else
+				{
+					//// 处理识别后自动复制功能 (只有同时开启了 ① 识别后自动复制 和 ② 自动翻译 和 ③ 翻译后自动复制，才不复制识别结果)
+					if (autoCopyOcr && (!autoTranslate || !autoCopyTranslate))
+					{
+						SetClipboardWithLock(RichBoxBody.Text);
+						Debug.WriteLine("识别后自动复制成功");
 
-			// --- 步骤 4: 触发后续逻辑 ---
-			// (百度搜索和无弹窗模式会提前返回)
-			if (baidu_flags == "百度")
-			{
-				FormBorderStyle = FormBorderStyle.Sizable;
-				// Size = new Size((int)font_base.Width * 23, (int)font_base.Height * 24);
-				this.Size = this.lastNormalSize;
-				Visible = false;
-				WindowState = FormWindowState.Minimized;
-				Show();
-				Process.Start("https://www.baidu.com/s?wd=" + RichBoxBody.Text);
-				baidu_flags = "";
+					}
+				}
+
+				// --- 步骤 4: 触发后续逻辑 ---
+				// (百度搜索和无弹窗模式会提前返回)
+				if (baidu_flags == "百度")
+				{
+					FormBorderStyle = FormBorderStyle.Sizable;
+					// Size = new Size((int)font_base.Width * 23, (int)font_base.Height * 24);
+					this.Size = this.lastNormalSize;
+					Visible = false;
+					WindowState = FormWindowState.Minimized;
+					Show();
+					Process.Start("https://www.baidu.com/s?wd=" + RichBoxBody.Text);
+					baidu_flags = "";
+					if (IniHelper.GetValue("快捷键", "翻译文本") != "请按下快捷键")
+					{
+						var value = IniHelper.GetValue("快捷键", "翻译文本");
+						var text2 = "None";
+						var text3 = "F9";
+						SetHotkey(text2, text3, value, 205);
+					}
+					HelpWin32.UnregisterHotKey(Handle, 222);
+					return;
+				}
+
+				// 处理识别后自动翻译功能
+				if (autoTranslate)
+				{
+					try
+					{
+						auto_fla = "";
+						isOcrTranslation = true;
+						BeginInvoke(new Translate(TransClick)); // 使用BeginInvoke避免阻塞
+					}
+					catch { }
+				}
+				// 处理文本检查功能
+				if (bool.Parse(IniHelper.GetValue("工具栏", "检查")))
+				{
+					try
+					{
+						RichBoxBody.Find = "";
+					}
+					catch
+					{
+						//
+					}
+				}
+
+				// --- 步骤 5: 最后收尾 ---
+				// 重新设置热键
 				if (IniHelper.GetValue("快捷键", "翻译文本") != "请按下快捷键")
 				{
-					var value = IniHelper.GetValue("快捷键", "翻译文本");
-					var text2 = "None";
-					var text3 = "F9";
-					SetHotkey(text2, text3, value, 205);
+					var value3 = IniHelper.GetValue("快捷键", "翻译文本");
+					SetHotkey("None", "F9", value3, 205);
 				}
 				HelpWin32.UnregisterHotKey(Handle, 222);
-				return;
 			}
-		
-			// 处理识别后自动翻译功能
-			if (autoTranslate)
+			finally
 			{
-				try
-				{
-					auto_fla = "";
-					isOcrTranslation = true;
-					BeginInvoke(new Translate(TransClick)); // 使用BeginInvoke避免阻塞
-				}
-				catch { }
-			}
-			// 处理文本检查功能
-			if (bool.Parse(IniHelper.GetValue("工具栏", "检查")))
-			{ 
-				try
-				{
-					RichBoxBody.Find = "";
-				}
-				catch
-				{
-					//
-				} 
-			}
+				// ==================== 【状态重置点】 ====================
 
-			// --- 步骤 5: 最后收尾 ---
-			// 重新设置热键
-			if (IniHelper.GetValue("快捷键", "翻译文本") != "请按下快捷键")
-			{
-				var value3 = IniHelper.GetValue("快捷键", "翻译文本");
-				SetHotkey("None", "F9", value3, 205);
+				// 1. 无论如何，重置流式标记
+				isStreaming = false;
+				
+                if (transtalate_fla == "开启")
+                {
+                    this.RichBoxBody.richTextBox1.TextChanged -= RichBoxBody_TextChanged;
+                    this.RichBoxBody.richTextBox1.TextChanged += RichBoxBody_TextChanged;
+                }
+                else
+                {
+                    this.RichBoxBody.richTextBox1.TextChanged -= RichBoxBody_TextChanged;
+					 // 【新增】防止后台读秒
+            		if (translationTimer != null) translationTimer.Stop(); 
+                }
+
+                // 2. 无论如何，确保文本框解锁 (防止万一报错导致文本框锁死)
+                // 即使是静默模式，解锁一下也无害
+                if (RichBoxBody != null && RichBoxBody.richTextBox1 != null)
+				{
+					//恢复ocr结果框的工具栏
+                    RichBoxBody.SetToolbarEnabled(true);
+                    RichBoxBody.richTextBox1.ReadOnly = false;
+				}
+
+				// 3. 截图翻译模式重置 (如果之前是在 return 前做的，也可以移到这里)
+				// 注意：如果你希望仅在特定情况下重置，保留在上面；
+				// 但通常这种状态标记都适合在这里兜底重置
+				// isScreenshotTranslateMode = false; 
+
+				LogState("Main_OCR_Thread_last End (Cleanup Done)");
 			}
-			HelpWin32.UnregisterHotKey(Handle, 222);
 		}
-		private void LogState(string eventName)
+
+        private void LogState(string eventName)
 		{
 			// C# 6.0+ string interpolation, simpler
 			System.Diagnostics.Debug.WriteLine($"--- {eventName} ---");
@@ -5353,8 +5727,42 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 					CommonHelper.AddLog($"释放 RapidOCR 引擎时出错: {ex.Message}");
 				}
 			}
-			
-			switch (name)
+          
+            // === 【核心修复】: 如果选的不是 AI 接口，强制清除 AI 菜单的状态 ===
+            if (!string.IsNullOrEmpty(name) && name != "CustomOpenAI") // 只要不是点 AI
+            {
+                // 1. 清除 AI 主菜单的勾选和文字
+                if (ai_menu != null)
+                {
+                    //ai_menu.Checked = false;
+                    ai_menu.Text = "AI"; // 恢复默认文字，去掉 "√" 或 "DeepSeek..."
+
+                    // 2. 清除 AI 子菜单的勾选 (可选，保持子菜单选中状态也不错，看你习惯
+					// 遍历所有AI接口(厂商) (第二级)
+                    foreach (ToolStripItem item in ai_menu.DropDownItems)
+                    {
+                        if (item is ToolStripMenuItem providerItem)
+                        {
+                            // 清除厂商勾选
+                            providerItem.Checked = false;
+
+                            // 3.  关键：深入遍历模式 (第三级) 并清除勾选 
+                            if (providerItem.HasDropDownItems)
+                            {
+                                foreach (ToolStripItem subItem in providerItem.DropDownItems)
+                                {
+                                    if (subItem is ToolStripMenuItem modeItem)
+                                    {
+                                        modeItem.Checked = false; // 清除模式勾选
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            switch (name)
 			{
 				case "韩语":
 					interface_flag = "韩语";
@@ -5453,7 +5861,14 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 					Refresh();
 					rapidocr.Text = "RapidOCR√";
 					break;
-				case "从左向右" when !File.Exists("cvextern.dll"):
+                case "CustomOpenAI":
+                    interface_flag = "CustomOpenAI";
+                    Refresh(); // 先重置所有菜单文字
+                               // 这里先设置一个基础状态，具体的 "AI: DeepSeek..." 文字
+                               // 会由 SwitchToCustomAI 方法在后面覆盖更新
+                    ai_menu.Text = "AI√";
+                    break;
+                case "从左向右" when !File.Exists("cvextern.dll"):
 					MessageBox.Show("请从蓝奏网盘中下载cvextern.dll大小约25m，点击确定自动弹出网页。\r\n将下载后的文件与 天若OCR文字识别.exe 这个文件放在一起。");
 					Process.Start("https://www.lanzous.com/i1ab3vg");
 					break;
@@ -5646,7 +6061,7 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 				}
 			}
 		}
-
+		
 		/// <summary>
 		/// 在输入图像中查找轮廓并为每个轮廓绘制边界框，将结果绘制到目标图像上
 		/// </summary>
@@ -5986,73 +6401,7 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			image_ori.Dispose();
 		}
 
-		/// <summary>
-		/// 使用百度OCR识别图片内容，并将结果添加到OCR_baidu_b变量中
-		/// </summary>
-		/// <param name="image">需要识别的图片</param>
-		public void OcrBdUseB(Image image)
-		{
-			try
-			{
-				var str = "CHN_ENG";
-				var array = OcrHelper.ImgToBytes(image);
-				var data = "type=general_location&image=data" + HttpUtility.UrlEncode(":image/jpeg;base64," + Convert.ToBase64String(array)) + "&language_type=" + str;
-				var url = "http://ai.baidu.com/aidemo";
-				var referer = "http://ai.baidu.com/tech/ocr/general";
-				var value = CommonHelper.PostStrData(url, data, "", referer);
-				var jArray = JArray.Parse(((JObject)JsonConvert.DeserializeObject(value))["data"]["words_result"].ToString());
-				var text = "";
-				var array2 = new string[jArray.Count];
-				for (var i = 0; i < jArray.Count; i++)
-				{
-					var jObject = JObject.Parse(jArray[i].ToString());
-					text += jObject["words"].ToString().Replace("\r", "").Replace("\n", "");
-					array2[jArray.Count - 1 - i] = jObject["words"].ToString().Replace("\r", "").Replace("\n", "");
-				}
-				OCR_baidu_b = (OCR_baidu_b + text + "\r\n").Replace("\r\n\r\n", "");
-				Thread.Sleep(10);
-			}
-			catch(Exception)
-			{
-				//
-			}
-		}
-
-		/// <summary>
-		/// 使用百度OCR识别图片内容，并将结果添加到OCR_baidu_a变量中
-		/// </summary>
-		/// <param name="image">需要识别的图片</param>
-		public void OcrBdUseA(Image image)
-		{
-			try
-			{
-				var str = "CHN_ENG";
-				var array = OcrHelper.ImgToBytes(image);
-				var data = "type=general_location&image=data" + HttpUtility.UrlEncode(":image/jpeg;base64," + Convert.ToBase64String(array)) + "&language_type=" + str;
-				var bytes = Encoding.UTF8.GetBytes(data);
-				var httpWebRequest = (HttpWebRequest)WebRequest.Create("http://ai.baidu.com/tech/ocr/general");
-				httpWebRequest.CookieContainer = new CookieContainer();
-				httpWebRequest.GetResponse().Close();
-				var url = "http://ai.baidu.com/aidemo";
-				var referer = "http://ai.baidu.com/tech/ocr/general";
-				var value = CommonHelper.PostStrData(url, data, "", referer);
-				var jArray = JArray.Parse(((JObject)JsonConvert.DeserializeObject(value))["data"]["words_result"].ToString());
-				var text = "";
-				var array2 = new string[jArray.Count];
-				for (var i = 0; i < jArray.Count; i++)
-				{
-					var jObject = JObject.Parse(jArray[i].ToString());
-					text += jObject["words"].ToString().Replace("\r", "").Replace("\n", "");
-					array2[jArray.Count - 1 - i] = jObject["words"].ToString().Replace("\r", "").Replace("\n", "");
-				}
-				OCR_baidu_a = (OCR_baidu_a + text + "\r\n").Replace("\r\n\r\n", "");
-				Thread.Sleep(10);
-			}
-			catch (Exception)
-			{
-				//
-			}
-		}
+		
 
 		/// <summary>
 		/// 删除指定路径的文件或目录
@@ -6100,101 +6449,7 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			}
 		}
 
-		/// <summary>
-		/// 使用百度OCR识别图片内容，并将结果添加到OCR_baidu_e变量中
-		/// </summary>
-		/// <param name="image">需要识别的图片</param>
-		public void OcrBdUseE(Image image)
-		{
-			try
-			{
-				var str = "CHN_ENG";
-				var array = OcrHelper.ImgToBytes(image);
-				var data = "type=general_location&image=data" + HttpUtility.UrlEncode(":image/jpeg;base64," + Convert.ToBase64String(array)) + "&language_type=" + str;
-				var url = "http://ai.baidu.com/aidemo";
-				var referer = "http://ai.baidu.com/tech/ocr/general";
-				var value = CommonHelper.PostStrData(url, data, "", referer);
-				var jArray = JArray.Parse(((JObject)JsonConvert.DeserializeObject(value))["data"]["words_result"].ToString());
-				var text = "";
-				var array2 = new string[jArray.Count];
-				for (var i = 0; i < jArray.Count; i++)
-				{
-					var jObject = JObject.Parse(jArray[i].ToString());
-					text += jObject["words"].ToString().Replace("\r", "").Replace("\n", "");
-					array2[jArray.Count - 1 - i] = jObject["words"].ToString().Replace("\r", "").Replace("\n", "");
-				}
-				OCR_baidu_e = (OCR_baidu_e + text + "\r\n").Replace("\r\n\r\n", "");
-				Thread.Sleep(10);
-			}
-			catch
-			{
-				//
-			}
-		}
-
-		/// <summary>
-		/// 使用百度OCR识别图片内容，并将结果添加到OCR_baidu_d变量中
-		/// </summary>
-		/// <param name="image">需要识别的图片</param>
-		public void OcrBdUseD(Image image)
-		{
-			try
-			{
-				var str = "CHN_ENG";
-				var array = OcrHelper.ImgToBytes(image);
-				var data = "type=general_location&image=data" + HttpUtility.UrlEncode(":image/jpeg;base64," + Convert.ToBase64String(array)) + "&language_type=" + str;
-				var url = "http://ai.baidu.com/aidemo";
-				var referer = "http://ai.baidu.com/tech/ocr/general";
-				var value = CommonHelper.PostStrData(url, data, "", referer);
-				var jArray = JArray.Parse(((JObject)JsonConvert.DeserializeObject(value))["data"]["words_result"].ToString());
-				var text = "";
-				var array2 = new string[jArray.Count];
-				for (var i = 0; i < jArray.Count; i++)
-				{
-					var jObject = JObject.Parse(jArray[i].ToString());
-					text += jObject["words"].ToString().Replace("\r", "").Replace("\n", "");
-					array2[jArray.Count - 1 - i] = jObject["words"].ToString().Replace("\r", "").Replace("\n", "");
-				}
-				OCR_baidu_d = (OCR_baidu_d + text + "\r\n").Replace("\r\n\r\n", "");
-				Thread.Sleep(10);
-			}
-			catch
-			{
-				//
-			}
-		}
-
-		/// <summary>
-		/// 使用百度OCR识别图片内容，并将结果添加到OCR_baidu_c变量中
-		/// </summary>
-		/// <param name="image">需要识别的图片</param>
-		public void OcrBdUseC(Image image)
-		{
-			try
-			{
-				var str = "CHN_ENG";
-				var array = OcrHelper.ImgToBytes(image);
-				var data = "type=general_location&image=data" + HttpUtility.UrlEncode(":image/jpeg;base64," + Convert.ToBase64String(array)) + "&language_type=" + str;
-				var url = "http://ai.baidu.com/aidemo";
-				var referer = "http://ai.baidu.com/tech/ocr/general";
-				var value = CommonHelper.PostStrData(url, data, "", referer);
-				var jArray = JArray.Parse(((JObject)JsonConvert.DeserializeObject(value))["data"]["words_result"].ToString());
-				var text = "";
-				var array2 = new string[jArray.Count];
-				for (var i = 0; i < jArray.Count; i++)
-				{
-					var jObject = JObject.Parse(jArray[i].ToString());
-					text += jObject["words"].ToString().Replace("\r", "").Replace("\n", "");
-					array2[jArray.Count - 1 - i] = jObject["words"].ToString().Replace("\r", "").Replace("\n", "");
-				}
-				OCR_baidu_c = (OCR_baidu_c + text + "\r\n").Replace("\r\n\r\n", "");
-				Thread.Sleep(10);
-			}
-			catch
-			{
-				//
-			}
-		}
+		
 
 		/// <summary>
 		/// 处理image_num[1]到image_num[2]范围内的图片文件，使用OcrBdUseC进行OCR识别
@@ -6492,7 +6747,10 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			// 检查是否启用了快速翻译功能
 			if (IniHelper.GetValue("配置", "快速翻译") == "True")
 			{
-				var data = "";
+                // 在这里也停止定时器，防止用户触发textchange启动翻译定时器后又选中文字后按F9，
+                // 为了保险起见，手动介入时最好都停掉自动逻辑
+                if (translationTimer != null) translationTimer.Stop();
+                var data = "";
 				try
 				{
 					// 根据焦点位置获取待翻译文本
@@ -6517,177 +6775,9 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 					}
 					if (string.IsNullOrEmpty(trans_hotkey)) return;
 
-					// 获取当前翻译服务配置
-					string transService = StaticValue.Translate_Current_API;
-					string sectionName;
-					switch (transService)
-					{
-						case "谷歌":
-							sectionName = "Google";
-							break;
-						case "百度":
-							sectionName = "Baidu";
-							break;
-						case "腾讯":
-							sectionName = "Tencent";
-							break;
-						case "腾讯交互翻译":
-							sectionName = "TencentInteractive";
-							break;
-						case "彩云小译":
-							sectionName = "Caiyun";
-							break;
-						case "彩云小译2":
-							sectionName = "Caiyun2";
-							break;
-						case "百度2":
-							sectionName = "Baidu2";
-							break;
-						case "火山翻译":
-							sectionName = "Volcano";
-							break;
-						default:
-							sectionName = transService;
-							break;
-					}
-					if (!StaticValue.Translate_Configs.TryGetValue(sectionName, out var config))
-					{
-						config = new StaticValue.TranslateConfig { Source = "auto", Target = "自动判断" };
-					}
-
-					// 确定源语言和目标语言
-					string toLang;
-					string fromLang = config.Source;
-
-					// 自动判断目标语言
-					if (config.Target == "自动判断")
-					{
-						toLang = "en"; // 默认翻译为英文
-						// 中文<->英文互译逻辑
-						if (StaticValue.ZH2EN)
-						{
-							if (ch_count(trans_hotkey.Trim()) > en_count(trans_hotkey.Trim()) || (en_count(trans_hotkey.Trim()) == 1 && ch_count(trans_hotkey.Trim()) == 1))
-							{
-								toLang = "en";
-							}
-							else
-							{
-								toLang = "zh-CN";
-							}
-						}
-						// 中文<->日文互译逻辑
-						else if (StaticValue.ZH2JP)
-						{
-							// 统计中文字符和日文字符数量来判断主要语言
-							string textToCheck = trans_hotkey.Trim();
-							int chineseCount = ch_count(textToCheck);
-							// 对于日文，我们需要统计假名的数量，因为汉字在中日文都存在
-							int japaneseKanaCount = 0;
-							foreach (char c in textToCheck)
-							{
-								// 统计平假名 (U+3040-U+309F) 和片假名 (U+30A0-U+30FF)
-								if ((c >= '\u3040' && c <= '\u309F') || (c >= '\u30A0' && c <= '\u30FF'))
-								{
-									japaneseKanaCount++;
-								}
-							}
-							
-							// 如果日文假名多于中文字符，说明是日文文本，翻译到中文
-							// 否则翻译到日文
-							if (japaneseKanaCount > 0 && japaneseKanaCount >= chineseCount / 2)
-							{
-								// 有相当数量的假名，判断为日文，翻译到中文
-								toLang = "zh-CN";
-							}
-							else
-							{
-								// 中文字符占主导，翻译到日文
-								toLang = "ja";
-							}
-						}
-						// 中文<->韩文互译逻辑
-						else if (StaticValue.ZH2KO)
-						{
-							if (contain_kor(trans_hotkey.Trim()))
-							{
-								toLang = "zh-CN";
-							}
-							else
-							{
-								toLang = "ko";
-							}
-						}
-					}
-					else
-					{
-						toLang = config.Target;
-					}
-
-					// 处理百度和腾讯翻译服务的语言代码映射
-					if (transService == "百度")
-					{
-						if (fromLang == "zh-CN") fromLang = "zh";
-						if (toLang == "zh-CN") toLang = "zh";
-						if (fromLang == "ja") fromLang = "jp";
-						if (toLang == "ja") toLang = "jp";
-						if (fromLang == "ko") fromLang = "kor";
-						if (toLang == "ko") toLang = "kor";
-					}
-					if (transService == "腾讯")
-					{
-						if (fromLang == "zh-CN") fromLang = "zh";
-						if (toLang == "zh-CN") toLang = "zh";
-					}
-
-					// 调用相应的翻译服务进行翻译
-					switch (transService)
-					{
-						case "谷歌":
-							data = await GTranslateHelper.TranslateAsync(trans_hotkey, fromLang, toLang, "google");
-							break;
-						case "Bing":
-							data = await BingTranslator.TranslateAsync(trans_hotkey, fromLang, toLang);
-							break;
-						case "Bing2":
-						case "BingNew":
-							data = await BingTranslator2.TranslateAsync(trans_hotkey, fromLang, toLang);
-							break;
-						case "Microsoft":
-							data = await GTranslateHelper.TranslateAsync(trans_hotkey, fromLang, toLang, "microsoft");
-							break;
-						case "Yandex":
-							data = await GTranslateHelper.TranslateAsync(trans_hotkey, fromLang, toLang, "yandex");
-							break;
-						case "百度":
-							data = TranslateBaidu(trans_hotkey, fromLang, toLang, config.AppId, config.ApiKey);
-							break;
-						case "腾讯":
-							data = Translate_Tencent(trans_hotkey, fromLang, toLang, config.AppId, config.ApiKey);
-							break;
-						case "腾讯交互翻译":
-							data = await TencentTranslator.TranslateAsync(trans_hotkey, fromLang, toLang);
-							break;
-						case "彩云小译":
-							data = await CaiyunTranslator.TranslateAsync(trans_hotkey, fromLang, toLang);
-							break;
-						case "彩云小译2":
-							if (string.IsNullOrEmpty(config.ApiKey))
-								data = "[彩云小译2]：未配置Token";
-							else
-								data = await CaiyunTranslator2.TranslateAsync(trans_hotkey, fromLang, toLang, config.ApiKey);
-							break;
-						case "火山翻译":
-							data = await VolcanoTranslator.TranslateAsync(trans_hotkey, fromLang, toLang);
-							break;
-						case "百度2":
-							data = await BaiduTranslator2Helper.TranslateAsync(trans_hotkey, fromLang, toLang);
-							break;
-						default:
-							data = await GTranslateHelper.TranslateAsync(trans_hotkey, fromLang, toLang, "google");
-							break;
-					}
-					// 将翻译结果复制到剪贴板并粘贴到当前焦点位置
-					SetClipboardDataWithLock(DataFormats.UnicodeText, data);        
+                    data = await GetTranslationAsync(trans_hotkey);
+                    // 将翻译结果复制到剪贴板并粘贴到当前焦点位置
+                    SetClipboardDataWithLock(DataFormats.UnicodeText, data);        
 					Debug.WriteLine("快速翻译译文复制到剪贴板");
 					SendKeys.SendWait("^v");
 					return;
@@ -6706,7 +6796,7 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			SendKeys.Flush();
 			RichBoxBody.richTextBox1.TextChanged -= RichBoxBody_TextChanged;
 			RichBoxBody.Text = Clipboard.GetText();
-			RichBoxBody.richTextBox1.TextChanged += RichBoxBody_TextChanged;
+			// RichBoxBody.richTextBox1.TextChanged += RichBoxBody_TextChanged;
             // 1. 先让窗口以正常状态显示出来
             FormBorderStyle = FormBorderStyle.Sizable;
             Visible = true;
@@ -7151,7 +7241,11 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
         {
             // 如果只有 1 次点击，判定为“单击”，执行“切换显示/隐藏”
 				if (this.Visible)
-				{
+				{ 	
+					// 隐藏：先解绑
+            		RichBoxBody.richTextBox1.TextChanged -= RichBoxBody_TextChanged;
+					 // 【新增】防止后台读秒
+            		if (translationTimer != null) translationTimer.Stop(); 
 					// 如果窗口当前可见，则隐藏它
 					this.Hide();
 					this.Visible = false;
@@ -7339,10 +7433,43 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			trans_volcano.Text = "火山";
 			trans_caiyun2.Text = "彩云2";
 			trans_baidu2.Text = "百度2";
+			ai_menu_trans.Text = "AI";
+          
+            if (!string.IsNullOrEmpty(name) && name != "CustomOpenAI") // 只要不是点 AI
+            {
+                // 1. 清除 AI 主菜单的勾选和文字
+                if (ai_menu_trans != null)
+                {
+                    //ai_menu_trans.Checked = false;
+                    ai_menu_trans.Text = "AI"; // 恢复默认文字，去掉 "√" 或 "DeepSeek..."
 
+                    // 2. 清除 AI 子菜单的勾选 (可选，保持子菜单选中状态也不错，看你习惯
+                    // 遍历所有AI接口(厂商) (第二级)
+                    foreach (ToolStripItem item in ai_menu_trans.DropDownItems)
+                    {
+                        if (item is ToolStripMenuItem providerItem)
+                        {
+                            // 清除厂商勾选
+                            providerItem.Checked = false;
 
-			// 根据选择的翻译接口设置对应按钮文本
-			if (name == "百度")
+                            // 3.  关键：深入遍历模式 (第三级) 并清除勾选 
+                            if (providerItem.HasDropDownItems)
+                            {
+                                foreach (ToolStripItem subItem in providerItem.DropDownItems)
+                                {
+                                    if (subItem is ToolStripMenuItem modeItem)
+                                    {
+                                        modeItem.Checked = false; // 清除模式勾选
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 根据选择的翻译接口设置对应按钮文本
+            if (name == "百度")
 			{
 				trans_baidu.Text = "百度√";
 			}
@@ -7389,8 +7516,15 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			if (name == "百度2")
 			{
 				trans_baidu2.Text = "百度2√";
+			}			
+			if (name == "CustomOpenAI")
+			{
+				ai_menu_trans.Text = "AI√";
 			}
-			
+
+
+
+
 			// 保存翻译接口配置
 			IniHelper.SetValue("配置", "翻译接口", name);
 			
@@ -7400,7 +7534,9 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			// 如果翻译功能已开启，则执行翻译
 			if (transtalate_fla == "开启")
 			{
-				typeset_txt = RichBoxBody.Text;
+                RichBoxBody.richTextBox1.TextChanged -= RichBoxBody_TextChanged;
+                RichBoxBody.richTextBox1.TextChanged += RichBoxBody_TextChanged;
+                typeset_txt = RichBoxBody.Text;
 				PictureBox1.Visible = true;
 				PictureBox1.BringToFront();
 				trans_Calculate();
@@ -7992,6 +8128,8 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			rapidocr.Text = "RapidOCR";
 			write.Text = "手写";
 			baidu_handwriting.Text = "百度手写";
+			ai_menu.Text = "AI";
+
 		}
 
 		/// <summary>
@@ -8088,7 +8226,7 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			var dataObject = new DataObject();
 			dataObject.SetData(DataFormats.Html, new MemoryStream(utf.GetBytes(s2)));
 			var data = new HtmlToText().Convert(html);
-			dataObject.SetData(DataFormats.Text, data);
+			dataObject.SetData(DataFormats.UnicodeText, data);
 			SetClipboardWithLock(dataObject);
 			Debug.WriteLine("识别表格结果写入剪贴板");
 		}

@@ -117,4 +117,21 @@
   <resheader name="writer">
     <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </resheader>
+  <data name="label60.Text" xml:space="preserve">
+    <value>模式文件允许用户自定义提示词和请求参数。
+若不选择模式文件，将使用程序内置提示词和参数
+
+源语言和目标语言支持使用自然语言名称（如“简体中文”）
+或标准语言代码（如“zh-CN”、“en”）。
+系统会自动将这些参数注入到模式文件里提示词的占位符中。
+
+通过修改模式文件，可以利用 AI 实现多种文本处理，不只是翻译，
+例如：
+1. 翻译
+2. 润色
+3. 总结
+4. 对话聊天
+.....
+注：最终处理效果取决于所选 AI 模型的能力。</value>
+  </data>
 </root>

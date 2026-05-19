@@ -85,11 +85,7 @@ namespace TrOCR
 			this.trans_baidu2 = new global::System.Windows.Forms.ToolStripMenuItem();      // 百度翻译2
 
 			
-			// 表格OCR菜单项
-			this.baidu_table = new global::System.Windows.Forms.ToolStripMenuItem();
-			this.tx_table = new global::System.Windows.Forms.ToolStripMenuItem();
-			this.ali_table = new global::System.Windows.Forms.ToolStripMenuItem();
-			this.ocr_table = new global::System.Windows.Forms.ToolStripMenuItem();
+			
 			
 			// 主右键菜单
 			this.menu = new global::System.Windows.Forms.ContextMenuStrip();
@@ -147,6 +143,17 @@ namespace TrOCR
 			this.baidu_v = new global::System.Windows.Forms.ToolStripMenuItem();            // 百度VIP OCR
 			this.youdao = new global::System.Windows.Forms.ToolStripMenuItem();             // 有道OCR
 			this.wechat = new global::System.Windows.Forms.ToolStripMenuItem();             // 微信OCR
+			// 表格OCR菜单项
+			this.baidu_table = new global::System.Windows.Forms.ToolStripMenuItem();
+			this.tx_table = new global::System.Windows.Forms.ToolStripMenuItem();
+			this.ali_table = new global::System.Windows.Forms.ToolStripMenuItem();
+			this.ocr_table = new global::System.Windows.Forms.ToolStripMenuItem();
+			// AI_OCR菜单项
+			this.ai_menu = new global::System.Windows.Forms.ToolStripMenuItem();
+			// this.ai_openai_compatible = new global::System.Windows.Forms.ToolStripMenuItem();
+			// AI_Trans菜单项
+			this.ai_menu_trans = new global::System.Windows.Forms.ToolStripMenuItem();
+			// this.ai_openai_compatible_trans = new global::System.Windows.Forms.ToolStripMenuItem();
 			
 			// 文本转换菜单项
 			this.Chinese = new global::System.Windows.Forms.ToolStripMenuItem();            // 中文
@@ -259,6 +266,7 @@ namespace TrOCR
 			// 翻译接口菜单项设置
 			this.trans_input.DropDownItems.AddRange(new global::System.Windows.Forms.ToolStripItem[]
 			{
+				this.ai_menu_trans,
 				this.trans_google,
 				this.trans_baidu,
 				this.trans_tencent,
@@ -362,6 +370,24 @@ namespace TrOCR
 				this.tx_table,
 				this.ali_table
 			});
+			this.ai_menu.Name = "ai_menu";
+			this.ai_menu.Text = "AI";
+			// this.ai_openai_compatible.Name = "ai_openai_compatible";
+			// this.ai_openai_compatible.Text = "OpenAICompatible";
+			// //this.ai_openai_compatible.Click += new global::System.EventHandler(this.OCR_ai_openai_compatible_Click);
+			// this.ai_menu.DropDownItems.AddRange(new global::System.Windows.Forms.ToolStripItem[]
+			// {
+			// 	this.ai_openai_compatible
+			// });
+			this.ai_menu_trans.Name = "ai_menu_trans";
+			this.ai_menu_trans.Text = "AI";
+			// this.ai_openai_compatible_trans.Name = "ai_openai_compatible_trans";
+			// this.ai_openai_compatible_trans.Text = "OpenAICompatible";
+			//this.ai_openai_compatible_trans.Click += new global::System.EventHandler(this.Trans_ai_openai_compatible_Click);
+			// this.ai_menu_trans.DropDownItems.AddRange(new global::System.Windows.Forms.ToolStripItem[]
+			// {
+			// 	this.ai_openai_compatible_trans
+			// });
 			this.shupai.Text = "竖排";
 			this.shupai.Click += new global::System.EventHandler(this.OCR_shupai_Click);
 			this.write.Text = "手写";
@@ -408,7 +434,8 @@ namespace TrOCR
 			this.interface_button = this.Main_jiekou;
 			this.interface_button.DropDownItems.AddRange(new global::System.Windows.Forms.ToolStripItem[]
 			{
-				this.sougou,
+                this.ai_menu,
+                this.sougou,
 				this.tencent,
 				this.tencent_accurate,
 				this.youdao,
@@ -423,7 +450,8 @@ namespace TrOCR
 				this.Mathfuntion,
 				this.ocr_table,
 				this.shupai,
-				this.write // 【新增】将“手写”父菜单添加到这里
+				this.write, // 【新增】将“手写”父菜单添加到这里
+				
 				
 			});
 			if (global::TrOCR.Helper.IniHelper.GetValue("配置", "接口") == "百度")
@@ -787,12 +815,20 @@ namespace TrOCR
 		private global::System.Windows.Forms.ToolStripMenuItem tx_table;
 		private global::System.Windows.Forms.ToolStripMenuItem ali_table;
 		#endregion
+		//"AI_OCR"菜单
+		public global::System.Windows.Forms.ToolStripMenuItem ai_menu;
+		//"AI_OCR"子菜单
+		// public global::System.Windows.Forms.ToolStripMenuItem ai_openai_compatible;
+        //"AI_Trans"菜单
+        public global::System.Windows.Forms.ToolStripMenuItem ai_menu_trans;
+        //"AI_Trans"子菜单
+        // public global::System.Windows.Forms.ToolStripMenuItem ai_openai_compatible_trans;
 
-		#endregion
+        #endregion
 
-		#region 其他UI控件和变量
+        #region 其他UI控件和变量
 
-		public global::System.Drawing.SizeF font_base;
+        public global::System.Drawing.SizeF font_base;
 
 		public global::System.Windows.Forms.PictureBox PictureBox1;
 
